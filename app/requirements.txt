@@ -1,0 +1,13 @@
+mcp[cli]
+sqlalchemy
+pyodbc
+pyyaml
+azure-identity
+azure-keyvault-secrets
+python-dotenv
+pyjwt[crypto]
+
+# Optional DB drivers - uncomment the engines you use:
+# psycopg2-binary   # PostgreSQL
+# pymysql           # MySQL
+# oracledb          # Oracle
