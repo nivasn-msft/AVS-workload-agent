@@ -8,7 +8,7 @@ Azure AI Foundry, Microsoft Copilot, and AI agents live in the Azure control pla
 
 This post shows a pattern that closes that gap: a **managed Azure AI Foundry agent that answers natural-language questions by querying private databases running on VMs inside an AVS private cloud** — with **no data leaving your network, no credentials in code, and read-only access enforced end to end.**
 
-> **Get the code:** the full deployment kit — Bicep/ARM templates, the MCP server, and a one-command deploy script — is on GitHub at [**AVS-workload-agent**](https://github.com/nivasn_microsoft/AVS-workload-agent).
+> **Get the code:** the full deployment kit — Bicep/ARM templates, the MCP server, and a one-command deploy script — is on GitHub at [**AVS-workload-agent**](https://github.com/nivasn-msft/AVS-workload-agent).
 
 ## Solution overview
 
@@ -231,7 +231,7 @@ az keyvault secret set --vault-name avs-sql-kv-01 `
 
 In the Foundry portal: create the agent (model `gpt-5.4-mini`), attach the MCP tool (`https://avs-mcp-server.<env>.canadaeast.azurecontainerapps.io/mcp`, **Microsoft Entra / Project Managed Identity**), and test in the playground.
 
-**Deploy it yourself.** The entire bridge is packaged as an open, reusable kit on GitHub — [**AVS-workload-agent**](https://github.com/nivasn_microsoft/AVS-workload-agent) — with a Bicep template (and a compiled ARM JSON equivalent), a parameters file, and a one-command deploy script. It provisions the delegated subnet, the container registry, Key Vault (with the read-only secret), the VNet-integrated Container Apps environment and MCP server, and the managed-identity role assignments — optionally including the Azure AI Foundry account and model deployment. You point it at your existing VNet (the one connected to your AVS private cloud) and supply a read-only database credential; the script builds and pushes the MCP image and wires up the app. All that remains is creating the read-only database login and attaching the MCP tool to your agent in the portal.
+**Deploy it yourself.** The entire bridge is packaged as an open, reusable kit on GitHub — [**AVS-workload-agent**](https://github.com/nivasn-msft/AVS-workload-agent) — with a Bicep template (and a compiled ARM JSON equivalent), a parameters file, and a one-command deploy script. It provisions the delegated subnet, the container registry, Key Vault (with the read-only secret), the VNet-integrated Container Apps environment and MCP server, and the managed-identity role assignments — optionally including the Azure AI Foundry account and model deployment. You point it at your existing VNet (the one connected to your AVS private cloud) and supply a read-only database credential; the script builds and pushes the MCP image and wires up the app. All that remains is creating the read-only database login and attaching the MCP tool to your agent in the portal.
 
 ---
 
