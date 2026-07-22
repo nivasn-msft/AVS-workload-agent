@@ -1,31 +1,65 @@
-# Bring Azure AI to your private Azure VMware Solution workloads
+# Enabling Azure AI for Azure VMware Solution workloads
 
-*Query the databases running inside your AVS private cloud in natural language — securely, read-only, and without moving your data or exposing it to the internet.*
+*Bring Azure AI to the workloads running inside your AVS private cloud — databases, file shares, line-of-business apps, and more — by placing a small Model Context Protocol (MCP) server in front of each. Secure, in place, read-only, and without moving your data or exposing it to the internet.*
 
-Organizations move their VMware estates to **Azure VMware Solution (AVS)** so they can modernize on their own terms — lifting and shifting mission-critical applications into Azure without rewriting them. But that same "don't change it" advantage has a side effect: the systems that hold your most valuable data — core databases and line-of-business applications — run on private networks inside the private cloud, out of reach of the Azure-native AI services that could bring them to life.
+Organizations move their VMware estates to **Azure VMware Solution (AVS)** so they can modernize on their own terms — lifting and shifting mission-critical applications into Azure without rewriting them. But that same "don't change it" advantage has a side effect: the systems that hold your most valuable data — core databases, file servers, and line-of-business applications — run on private networks inside the private cloud, out of reach of the Azure-native AI services that could bring them to life.
 
 Azure AI Foundry, Microsoft Copilot, and AI agents live in the Azure control plane and, by default, reach only public endpoints. So when teams set out to "add AI everywhere," the workloads in AVS are often the exception — not because the data isn't valuable, but because it's private by design.
 
-This post shows a pattern that closes that gap: a **managed Azure AI Foundry agent that answers natural-language questions by querying private databases running on VMs inside an AVS private cloud** — with **no data leaving your network, no credentials in code, and read-only access enforced end to end.**
+This post shows a **repeatable pattern that closes that gap for any workload**: a managed Azure AI Foundry agent that reaches private AVS systems through lightweight **MCP servers** — one small bridge per workload type. Each new workload you want to make AI-accessible — a database today, a file share or an API tomorrow — is **one more MCP server**, behind the same agent, the same identity, and the same governance. We prove it end to end with private SQL databases, then show how the very same pattern extends to the rest of your estate — with **no data leaving your network, no credentials in code, and read-only access enforced end to end.**
 
 > **Get the code:** the full deployment kit — Bicep/ARM templates, the MCP server, and a one-command deploy script — is on GitHub at [**AVS-workload-agent**](https://github.com/nivasn-msft/AVS-workload-agent).
 
 ## Solution overview
 
+One managed agent in Azure AI Foundry talks to your private AVS workloads through a set of small **MCP servers** — one per workload type. SQL databases are live today; a file-share bridge or an API bridge is *the same pattern with different tools*.
+
 ```mermaid
 flowchart LR
-    U["Business user"] --> AG["Azure AI Foundry<br/>managed agent — gpt-5.4-mini"]
-    AG -->|"Entra managed-identity token"| MCP["MCP Data Server<br/>Azure Container Apps (VNet-integrated)"]
-    MCP -->|"managed identity"| KV[("Key Vault<br/>avs-sql-kv-01")]
-    MCP -->|"ExpressRoute, read-only"| S1[("SalesDB<br/>192.168.131.55")]
-    MCP -->|"ExpressRoute, read-only"| S2[("InventoryDB<br/>192.168.131.56")]
+    U["Business users<br/>Teams · Copilot · Foundry"] --> AG["Azure AI Foundry<br/>managed agent"]
+    subgraph az["Azure — VNet-integrated Container Apps"]
+        M1["SQL<br/>MCP server"]
+        M2["File-share<br/>MCP server"]
+        M3["API / LOB<br/>MCP server"]
+    end
+    subgraph avs["Azure VMware Solution — private cloud"]
+        W1[("Databases")]
+        W2["File shares<br/>SMB · NFS"]
+        W3["Line-of-business<br/>apps · REST/SOAP"]
+    end
+    AG -->|"MCP + Entra token"| M1
+    AG -->|"MCP + Entra token"| M2
+    AG -->|"MCP + Entra token"| M3
+    M1 -->|"ExpressRoute"| W1
+    M2 -->|"ExpressRoute"| W2
+    M3 -->|"ExpressRoute"| W3
 ```
 
 Three ideas carry the design:
 
-1. **Model Context Protocol (MCP)** gives the agent a clean, tool-based contract to data (`list_sources`, `get_schema`, `run_query`).
-2. **A VNet-integrated Azure Container App** is the bridge that can legally see *both* worlds — Azure and the private AVS network over ExpressRoute.
-3. **Managed identity end-to-end** — no passwords in code or config; the agent presents an Entra token, the server pulls DB credentials from Key Vault.
+1. **Model Context Protocol (MCP) is the universal contract.** Every workload is exposed through the same small set of tools (for the SQL bridge: `list_sources`, `get_schema`, `run_query`). The agent learns one way to ask; each MCP server translates it to its workload.
+2. **One lightweight bridge per workload type.** Each MCP server is a VNet-integrated Azure Container App that can legally see *both* worlds — Azure and the private AVS network over ExpressRoute. Want to make another workload AI-accessible? **Add another MCP server** — no change to the agent.
+3. **Managed identity end-to-end** — no passwords in code or config; the agent presents an Entra token, and each server pulls the credentials it needs from Key Vault.
+
+The rest of this post proves the pattern with a working SQL example — two private databases behind one MCP server — and then shows how the same bridge extends to file shares, APIs, and beyond.
+
+---
+
+## One pattern, every workload
+
+The power of the design is that it is **workload-agnostic**. The agent, the network path, the Entra identity, and the governance model are built **once**; each new workload is just a new MCP server that speaks the same tool contract. You light up your estate incrementally — highest-value workloads first — without re-architecting anything.
+
+| AVS workload | MCP bridge | Example tools | What it unlocks |
+|---|---|---|---|
+| **SQL databases** (SQL Server, PostgreSQL, Oracle, MySQL) | SQL MCP server *(live in this post)* | `list_sources`, `get_schema`, `run_query` | Natural-language questions and cross-database corroboration |
+| **File shares** (SMB / NFS, document stores) | File MCP server | `list_dirs`, `search`, `read_file` | Q&A and summarization over contracts, drawings, PDFs, logs |
+| **Line-of-business apps** (REST / SOAP) | API MCP server | `list_operations`, `call_operation` | Conversational access to ERP, ticketing, claims, orders |
+| **NoSQL / message systems** | Connector MCP server | `list_collections`, `query`, `peek` | Reasoning over document stores and event streams |
+| **Mainframe / other systems** | Adapter MCP server | workload-specific | Bringing legacy systems into modern AI workflows |
+
+Every bridge is small, independently deployable, and governed the same way: read-only by default, private over ExpressRoute, and locked to your agent's managed identity. **The pattern is the product; the MCP servers are how you grow it.**
+
+Everything that follows — network, identity, governance, deployment — is reused unchanged by every MCP server you add. To make it concrete, here is the first proof of the pattern: a secure, read-only agent over two private SQL databases in AVS.
 
 ---
 
@@ -93,9 +127,9 @@ Key points:
 
 ---
 
-## The data bridge: a Model Context Protocol server
+## The data bridge: the SQL MCP server
 
-A small Python service (FastMCP, `streamable-http`) exposes three read-only tools. It is engine-agnostic (SQLAlchemy) and pulls credentials from Key Vault at runtime.
+This is the first bridge — the **SQL MCP server**. A small Python service (FastMCP, `streamable-http`) exposes three read-only tools; it is engine-agnostic (SQLAlchemy) and pulls credentials from Key Vault at runtime. A file-share or API bridge has the *same shape* — a small container, an Entra-validated endpoint, and a handful of read-only tools — with connectors suited to its workload.
 
 ```python
 @mcp.tool()
@@ -139,7 +173,7 @@ The agent lives entirely in **`avs-sql-foundry` / project `avs-sql-agent`** (mod
 - **Instructions** that force a schema-first workflow (discover sources → read schema → write read-only SQL → corroborate).
 - An **MCP tool** pointing at the Container App's `/mcp` endpoint, authenticated with **Microsoft Entra / Project Managed Identity**.
 
-Generic, source-agnostic instructions (the productizable version) tell the agent to *discover* structure at runtime rather than hard-coding any schema — so the same agent works against any databases behind the MCP server.
+Generic, source-agnostic instructions (the productizable version) tell the agent to *discover* structure at runtime rather than hard-coding any schema — so the same agent works against **any workload behind an MCP server**, not just these databases.
 
 ![The AVS data agent in Azure AI Foundry with the MCP tool attached](./media/agent-mcp-tool.png)
 *Figure 1: The managed agent in Azure AI Foundry, with the private MCP data server attached as a tool and authenticated via managed identity.*
@@ -200,15 +234,18 @@ The same pattern generalizes: *claims vs policy*, *orders vs fulfillment*, *tick
 
 ---
 
-## Extending it to any data source
+## Adding the next workload
 
-The single-purpose server becomes reusable with four moves:
-1. **SQLAlchemy** → one code path for SQL Server, PostgreSQL, MySQL, Oracle (source `type` selects the dialect).
-2. **Config-driven catalog** → onboard a database with YAML + a Key Vault secret.
-3. **Governance layer** → per-source allow/deny schemas, row caps, (optional) column masking.
-4. **Connector interface** → SQL today; files / REST / NoSQL later behind the same three tools.
+Growing coverage happens at two levels — **within** a bridge and **across** bridges.
 
-Adding a Postgres VM, for example, requires **no `mcp_server.py` changes** — add `psycopg2-binary` to requirements, a source block (`type: postgresql`, `allow_schemas: [public]`), and a Key Vault secret, then rebuild.
+**Within the SQL bridge** (another database), it's config, not code:
+1. **SQLAlchemy** gives one code path for SQL Server, PostgreSQL, MySQL, and Oracle — the source `type` selects the dialect.
+2. **Config-driven catalog** — onboard a database with a YAML block + a Key Vault secret.
+3. **Governance layer** — per-source allow/deny schemas, row caps, and optional column masking.
+
+Adding a PostgreSQL VM, for example, requires **no `mcp_server.py` changes** — add `psycopg2-binary`, a source block (`type: postgresql`, `allow_schemas: [public]`), and a secret, then rebuild.
+
+**Across workload types** (a file share, an API), you add a **new MCP server** that implements the same tool contract with connectors suited to that workload — `read_file` / `search` for a document store, `call_operation` for a REST or SOAP app — then attach it to the same agent. Nothing about the agent, the network, or the identity model changes. The estate lights up **one MCP server at a time**.
 
 ---
 
@@ -237,16 +274,18 @@ In the Foundry portal: create the agent (model `gpt-5.4-mini`), attach the MCP t
 
 ## What's next
 
-- **Meet users where they are** — surface the agent in **Microsoft Teams or Microsoft 365 Copilot** through a lightweight, VNet-integrated API.
-- **One agent, many databases** — the same pattern points at SQL Server, PostgreSQL, MySQL, or Oracle with configuration, not code.
-- **Beyond relational data** — extend the same tool contract to file shares, REST APIs, and other sources.
+- **Meet users where they are** — surface the agent in **Microsoft Teams or Microsoft 365 Copilot** so the whole organization can ask questions of AVS workloads in natural language.
+- **One agent, every workload** — grow from databases to **file shares, REST/SOAP apps, NoSQL, and message systems**, each a new MCP server behind the same agent.
+- **A workload catalog** — a library of ready-made MCP bridges so onboarding a new AVS workload becomes a deploy-and-configure step, not a project.
 
 ---
 
 ## Bringing it together
 
-With a managed agent in Azure AI Foundry, a lightweight bridge on VNet-integrated Azure Container Apps, and private connectivity over ExpressRoute, data that used to be "off-limits to AI" becomes conversational — while staying **inside your network, read-only, and credential-less**, using the same identity and governance model you already rely on across Azure.
+With a managed agent in Azure AI Foundry, lightweight **MCP servers** on VNet-integrated Azure Container Apps, and private connectivity over ExpressRoute, workloads that used to be "off-limits to AI" become conversational — while staying **inside your network, read-only, and credential-less**, using the same identity and governance model you already rely on across Azure.
 
-For organizations on Azure VMware Solution, this reframes what AVS is for: not just where your VMware workloads *run*, but where they become **AI-accessible** — securely and in place.
+The SQL example is just the first bridge. Because every workload is reached the same way, **enabling AI across your AVS estate becomes a repeatable motion**: pick the next workload, add a small MCP server, and it's live — no data movement, no re-platforming, no new trust boundary.
 
-*Reference architecture: managed Azure AI Foundry agent → MCP server on VNet-integrated Azure Container Apps → ExpressRoute → private SQL databases in Azure VMware Solution. Read-only, credential-less, private, and auditable.*
+For organizations on Azure VMware Solution, this reframes what AVS is for: not just where your VMware workloads *run*, but where they become **AI-accessible** — one MCP server at a time, securely and in place.
+
+*The pattern: managed Azure AI Foundry agent → MCP servers on VNet-integrated Azure Container Apps → ExpressRoute → private workloads (databases, file shares, apps) in Azure VMware Solution. Read-only, credential-less, private, and auditable.*
