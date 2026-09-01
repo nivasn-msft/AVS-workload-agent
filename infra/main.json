@@ -5,7 +5,7 @@
     "_generator": {
       "name": "bicep",
       "version": "0.36.177.2456",
-      "templateHash": "13715581381637309057"
+      "templateHash": "12429241047086819498"
     }
   },
   "parameters": {
@@ -95,7 +95,14 @@
       "type": "bool",
       "defaultValue": true,
       "metadata": {
-        "description": "Also deploy an Azure AI Foundry (AIServices) account + model deployment."
+        "description": "Also deploy an Azure AI Foundry (AIServices) account + project + model deployment."
+      }
+    },
+    "foundryProjectName": {
+      "type": "string",
+      "defaultValue": "[format('{0}-project', parameters('namePrefix'))]",
+      "metadata": {
+        "description": "Name of the Foundry project that will host the agent. Its managed identity is the caller you put in allowedCallers."
       }
     },
     "foundryLocation": {
@@ -365,7 +372,7 @@
     {
       "condition": "[parameters('deployFoundry')]",
       "type": "Microsoft.CognitiveServices/accounts",
-      "apiVersion": "2024-10-01",
+      "apiVersion": "2025-06-01",
       "name": "[variables('foundryName')]",
       "location": "[parameters('foundryLocation')]",
       "kind": "AIServices",
@@ -376,14 +383,32 @@
         "type": "SystemAssigned"
       },
       "properties": {
+        "allowProjectManagement": true,
         "customSubDomainName": "[toLower(variables('foundryName'))]",
         "publicNetworkAccess": "Enabled"
       }
     },
     {
       "condition": "[parameters('deployFoundry')]",
+      "type": "Microsoft.CognitiveServices/accounts/projects",
+      "apiVersion": "2025-06-01",
+      "name": "[format('{0}/{1}', variables('foundryName'), parameters('foundryProjectName'))]",
+      "location": "[parameters('foundryLocation')]",
+      "identity": {
+        "type": "SystemAssigned"
+      },
+      "properties": {
+        "displayName": "[parameters('foundryProjectName')]",
+        "description": "Agents that query private databases inside AVS via the MCP server."
+      },
+      "dependsOn": [
+        "[resourceId('Microsoft.CognitiveServices/accounts', variables('foundryName'))]"
+      ]
+    },
+    {
+      "condition": "[parameters('deployFoundry')]",
       "type": "Microsoft.CognitiveServices/accounts/deployments",
-      "apiVersion": "2024-10-01",
+      "apiVersion": "2025-06-01",
       "name": "[format('{0}/{1}', variables('foundryName'), parameters('modelName'))]",
       "sku": {
         "name": "GlobalStandard",
@@ -436,7 +461,15 @@
     },
     "foundryEndpoint": {
       "type": "string",
-      "value": "[if(parameters('deployFoundry'), reference(resourceId('Microsoft.CognitiveServices/accounts', variables('foundryName')), '2024-10-01').endpoint, '')]"
+      "value": "[if(parameters('deployFoundry'), reference(resourceId('Microsoft.CognitiveServices/accounts', variables('foundryName')), '2025-06-01').endpoint, '')]"
+    },
+    "foundryProjectEndpoint": {
+      "type": "string",
+      "value": "[if(parameters('deployFoundry'), format('https://{0}.services.ai.azure.com/api/projects/{1}', toLower(variables('foundryName')), parameters('foundryProjectName')), '')]"
+    },
+    "foundryProjectPrincipalId": {
+      "type": "string",
+      "value": "[if(parameters('deployFoundry'), reference(resourceId('Microsoft.CognitiveServices/accounts/projects', variables('foundryName'), parameters('foundryProjectName')), '2025-06-01', 'full').identity.principalId, '')]"
     }
   }
 }

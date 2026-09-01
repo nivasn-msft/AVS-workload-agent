@@ -74,8 +74,11 @@ param allowedAudiences string = ''
 @description('Allowed caller app IDs / azp (comma-separated). Set to your Foundry project managed identity after the agent exists.')
 param allowedCallers string = ''
 
-@description('Also deploy an Azure AI Foundry (AIServices) account + model deployment.')
+@description('Also deploy an Azure AI Foundry (AIServices) account + project + model deployment.')
 param deployFoundry bool = true
+
+@description('Name of the Foundry project that will host the agent. Its managed identity is the caller you put in allowedCallers.')
+param foundryProjectName string = '${namePrefix}-project'
 
 @description('Location for the Foundry account. Defaults to the main location, but the agent reaches the MCP server over public HTTPS, so Foundry can live in a model-rich region when the AVS region has no GPT models (e.g. westus2).')
 param foundryLocation string = location
@@ -305,8 +308,11 @@ resource acrRoleAssignment 'Microsoft.Authorization/roleAssignments@2022-04-01' 
   }
 }
 
-// ---- (optional) Azure AI Foundry account + model deployment ----------------
-resource foundry 'Microsoft.CognitiveServices/accounts@2024-10-01' = if (deployFoundry) {
+// ---- (optional) Azure AI Foundry account + project + model deployment ------
+// allowProjectManagement is REQUIRED for the Agent Service: without it the account
+// cannot host a project, and the project's managed identity is what authenticates to
+// the MCP server. An account created without it can only serve raw model inference.
+resource foundry 'Microsoft.CognitiveServices/accounts@2025-06-01' = if (deployFoundry) {
   name: foundryName
   location: foundryLocation
   kind: 'AIServices'
@@ -317,12 +323,28 @@ resource foundry 'Microsoft.CognitiveServices/accounts@2024-10-01' = if (deployF
     type: 'SystemAssigned'
   }
   properties: {
+    allowProjectManagement: true
     customSubDomainName: toLower(foundryName)
     publicNetworkAccess: 'Enabled'
   }
 }
 
-resource model 'Microsoft.CognitiveServices/accounts/deployments@2024-10-01' = if (deployFoundry) {
+// The project owns the managed identity that calls the MCP server. Its app id (azp)
+// is what you put in allowedCallers.
+resource foundryProject 'Microsoft.CognitiveServices/accounts/projects@2025-06-01' = if (deployFoundry) {
+  parent: foundry
+  name: foundryProjectName
+  location: foundryLocation
+  identity: {
+    type: 'SystemAssigned'
+  }
+  properties: {
+    displayName: foundryProjectName
+    description: 'Agents that query private databases inside AVS via the MCP server.'
+  }
+}
+
+resource model 'Microsoft.CognitiveServices/accounts/deployments@2025-06-01' = if (deployFoundry) {
   parent: foundry
   name: modelName
   sku: {
@@ -348,3 +370,7 @@ output keyVaultName string = kv.name
 output appPrincipalId string = uami.properties.principalId
 output appClientId string = uami.properties.clientId
 output foundryEndpoint string = deployFoundry ? foundry!.properties.endpoint : ''
+// Data-plane endpoint the Agent Service SDK / REST API talks to.
+output foundryProjectEndpoint string = deployFoundry ? 'https://${toLower(foundryName)}.services.ai.azure.com/api/projects/${foundryProjectName}' : ''
+// Put this in allowedCallers once the project exists (it is the azp your MCP server sees).
+output foundryProjectPrincipalId string = deployFoundry ? foundryProject!.identity.principalId : ''

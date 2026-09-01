@@ -83,10 +83,30 @@ az deployment group create -g <rg> --template-file infra/main.json `
    "audience = api://$($app.appId)"
    ```
 
-3. **In the Azure AI Foundry portal:** create a project + agent (use the model deployed here), then **attach an MCP tool**:
+3. **In the Azure AI Foundry portal:** the template already created the account, the **project** (`foundryProjectName`) and the model deployment, so open the project and create an **agent** on that model, then **attach an MCP tool**:
    - **Server URL:** the `mcpEndpoint` output (e.g. `https://<app>.<region>.azurecontainerapps.io/mcp`)
    - **Authentication:** Microsoft Entra / **Project Managed Identity**
    - **Audience:** `api://<appId>` from step 2
+
+   > **This step is portal-only.** The MCP tool's authentication cannot be set from code
+   > on the current Agent Service API: `authorization`, `auth`, `audience`,
+   > `connection_id` and `require_approval` are all rejected as `unknown_parameter` when
+   > creating the tool (observed on `api-version=v1` and `2025-05-15-preview`), and a
+   > created tool echoes back only `{type, server_label, server_url, allowed_tools}`.
+   > This API surface is moving quickly — re-check on newer API versions.
+   >
+   > **Don't try to work around it by passing a bearer token yourself** via
+   > `tool_resources.mcp[].headers` on the run. Foundry will not forward a
+   > *cryptographically valid* Entra token that way: the run fails with a generic
+   > `server_error` and **no request ever leaves Foundry**. The same token with its
+   > signature corrupted, and a random string of the same length, both get through and
+   > reach the server — so this is a credential-forwarding guardrail in the service, not
+   > a size or schema limit. `headers` remains usable for servers that authenticate with
+   > a static, non-Entra API key.
+   >
+   > Until the tool's Entra auth is configured the agent sends **no** token, the server
+   > correctly answers `401`, and the run fails with
+   > `MCP Connector error. Http status: 424 ... Error retrieving tool list`.
 
 4. **Lock the endpoint to your agent** (the server ships in *discovery mode* to make this painless):
    - Ask one test question in the playground. The server **logs the caller's identity**:
@@ -116,7 +136,8 @@ az deployment group create -g <rg> --template-file infra/main.json `
 | `location` | RG location | Put this in the **VNet's** region |
 | `foundryLocation` | `location` | Foundry may live elsewhere — the agent reaches the MCP server over public HTTPS. Use this when the AVS region has no GPT models (e.g. `westus2`) |
 | `containerImage` | public placeholder | Swapped to your image by `deploy.ps1` |
-| `deployFoundry` | `true` | Also create a Foundry account + model |
+| `deployFoundry` | `true` | Also create a Foundry account + **project** + model. The account is created with `allowProjectManagement`, without which no project can exist — and without a project you cannot create an agent at all |
+| `foundryProjectName` | `<namePrefix>-project` | Foundry project that hosts the agent. Its endpoint and system-assigned principal are returned as the `foundryProjectEndpoint` / `foundryProjectPrincipalId` outputs |
 | `modelName` / `modelVersion` | `gpt-5.4-mini` / `2026-03-17` | **Verify before deploying:** model availability *and lifecycle* vary by region, and a model whose `lifecycleStatus` is `Deprecating` is rejected for **new** deployments even where it still runs. Check with `az cognitiveservices model list -l <foundryLocation> --query "[?model.name=='<name>'].{v:model.version,s:model.lifecycleStatus,sku:model.skus[].name}"` |
 | `allowedAudiences` / `allowedCallers` | `''` | Set after the agent exists (see step 4) |
 | `discoveryMode` | `false` | Temporarily accept any valid Entra token so you can read the caller `azp` from the logs. **Never leave this on.** |
@@ -142,6 +163,7 @@ Uncomment the driver in `app/requirements.txt` (`psycopg2-binary`, `pymysql`, `o
 - **Read-only** — only `SELECT`/`WITH`; DML/DDL blocked; results row-capped per source. Back this with a genuinely read-only DB login (`db_datareader`) so the database enforces it too.
 - **No secrets in code** — DB passwords live in Key Vault; the app reads them with its user-assigned managed identity and caches them for `SECRET_TTL_SECONDS` (default 1h) so rotations converge.
 - **Managed-identity auth** — the agent presents an Entra token; the server validates signature, audience, issuer, and caller (`azp`) on **every** request.
+- **Match `azp`, not `appid`** — Foundry calls the tool with a **v2** token whose `appid` claim is **empty**; the calling application's identity is carried in **`azp`**. Anything that authorizes on `appid` alone — including Container Apps **Easy Auth**, whose allowed-client-applications list matches `appid` — will therefore reject the agent no matter what you put in the list. That is why authorization is done in-app here: `AuthMiddleware` reads `azp` first and falls back to `appid` for other callers. (Easy Auth's "allow any application" toggle would sidestep the matching problem, but it also removes the caller check entirely, and many tenants disable it by policy.)
 - **Fails closed** — the ingress is internet-facing, so an unset `ALLOWED_CALLERS` must never mean "allow anyone". With no allow-list the server returns `503` until you either set `ALLOWED_CALLERS` or *explicitly* opt into `discoveryMode`. Discovery mode still requires a valid, signature-verified Entra token from your tenant; it only relaxes the caller allow-list. Turn it off once you've read the `azp`.
 - **Private** — reaches AVS over ExpressRoute; databases are never exposed to the internet.
 - **Transport** — connections use `Encrypt=yes`, but default to `TrustServerCertificate=yes` because AVS workload VMs typically present self-signed SQL certificates. That encrypts the link without authenticating the server; set `SQL_TRUST_SERVER_CERT=false` once your databases use a trusted certificate.
@@ -151,6 +173,10 @@ Uncomment the driver in `app/requirements.txt` (`psycopg2-binary`, `pymysql`, `o
 ## Troubleshooting
 - **`503` / "server is not locked down":** `ALLOWED_CALLERS` is empty and discovery mode is off. This is deliberate — set `allowedCallers`, or deploy once with `discoveryMode=true` to learn the `azp`.
 - **`401 unauthorized` after locking:** the token's `azp` doesn't match `ALLOWED_CALLERS`. Re-check the discovery log line, or redeploy with `discoveryMode=true` to re-enter discovery.
+- **Run fails with `MCP Connector error. Http status: 424 ... Error retrieving tool list from MCP server`:** Foundry reached the server but couldn't list tools. Almost always the tool has **no authentication configured**, so it called anonymously and got the server's `401`. Configure Entra / Project Managed Identity on the tool (step 3). Confirm the direction of the failure from the server side — a `401` in the container logs means the request arrived; *no* log line at all means Foundry never called out.
+- **Run fails with a bare `server_error` and nothing reaches the server:** you are passing a real Entra token in `tool_resources.mcp[].headers`. Foundry blocks forwarding valid Entra tokens (see step 3) — configure auth on the tool instead.
+- **`401 unauthorized` while the tool *is* configured:** the `aud` Foundry sends may be the **bare app ID**, not the `api://` URI. Put **both** forms in `ALLOWED_AUDIENCES` (`api://<appId>,<appId>`).
+- **Env-var changes appear to do nothing:** the app reads its configuration once at process start, so `ALLOWED_CALLERS` / `ALLOWED_AUDIENCES` / `DISCOVERY_MODE` only take effect on a **new revision**. Redeploy, or restart the revision.
 - **Container App stuck `InProgress` with no revisions:** almost always the image pull. The template uses a **user-assigned** identity precisely so `AcrPull` exists *before* the app is created; a system-assigned identity deadlocks (the role assignment needs the app's principal, the app needs the role to start).
 - **`ModuleNotFoundError: No module named 'mcp.server.fastmcp'`:** you built with an unpinned MCP SDK. `requirements.txt` pins `mcp[cli]<2` because the 2.x SDK renamed `FastMCP`.
 - **No container logs anywhere:** the environment must have `appLogsConfiguration`. The template creates a Log Analytics workspace and wires it up; a revision created *before* that config was added must be restarted to start shipping logs. Query with:
