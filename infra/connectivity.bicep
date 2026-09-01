@@ -13,11 +13,26 @@
 //
 //  NOTE: the ExpressRoute gateway takes ~30-45 minutes to provision.
 //
+//  IMPORTANT - RESOURCE GROUP SCOPE:
+//    This template creates an ExpressRoute authorization ON your AVS private cloud, and
+//    a resource group deployment can only touch resources in its OWN resource group.
+//    You must therefore deploy this into the SAME resource group as the AVS private
+//    cloud, which means the hub VNet + gateway are created there too. (Creating the
+//    authorization cross-scope would require a nested module whose output is the
+//    authorization KEY -- a secret that would then be recorded in deployment history,
+//    so it is deliberately not done that way.)
+//    If you need the hub VNet in a different resource group, use the AVS portal feature
+//    "Azure vNet connect" instead, or create the authorization separately with:
+//      az vmware authorization create -g <avs-rg> -c <private-cloud> -n <auth-name>
+//
+//  NOTE: this template also creates the delegated 'aca-subnet'. When you then run
+//  main.bicep, pass createAcaSubnet=false so it does not re-write that same subnet.
+//
 //  DEPLOY:
-//    az deployment group create -g <your-rg> --template-file connectivity.bicep \
+//    az deployment group create -g <avs-private-cloud-rg> --template-file connectivity.bicep \
 //      --parameters avsPrivateCloudName=<your-avs-private-cloud>
 //
-//  Then run main.bicep with:  existingVnetName=<vnetName output>
+//  Then run main.bicep with:  existingVnetName=<vnetName output> createAcaSubnet=false
 // =============================================================================
 
 @description('Location for all resources.')
@@ -53,6 +68,7 @@ resource avs 'Microsoft.AVS/privateClouds@2023-09-01' existing = {
 resource avsAuth 'Microsoft.AVS/privateClouds/authorizations@2023-09-01' = {
   parent: avs
   name: 'avs-ai-agent-auth'
+  properties: {}
 }
 
 // Hub VNet with the gateway subnet + the delegated Container Apps subnet.

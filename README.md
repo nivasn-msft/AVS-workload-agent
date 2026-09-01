@@ -21,10 +21,11 @@ The agent calls an **MCP server** hosted on a **VNet-integrated Azure Container 
 
 ## Prerequisites
 
-- **Azure CLI** (`az`) — logged in and set to the target subscription (`az account set --subscription <id>`).
+- **Azure CLI** (`az`) — **version 2.53.0 or newer**, logged in and set to the target subscription (`az account set --subscription <id>`). Older CLIs pin the `Microsoft.App` API to `2022-10-01`, which predates Container Apps *workload profiles*: `az containerapp update` fails with `WorkloadProfilePropertyNotSupportedInApiVersion`, and `az containerapp show` reports `workloadProfiles: null` and an empty `workloadProfileName` **even when they are correctly set** — which makes triage actively misleading. Check with `az version`; upgrade with `az upgrade`. To inspect the app with a stale CLI, bypass it: `az rest --method get --url "<appResourceId>?api-version=2024-03-01"`.
 - **An AVS private cloud** with your databases on a workload segment.
 - **A VNet with ExpressRoute connectivity to AVS.** The simplest way is the built-in AVS **Azure vNet connect** feature (AVS private cloud → **Connectivity → Azure vNet connect**), which creates/selects a VNet with a `GatewaySubnet` and wires up ExpressRoute for you — no gateway to build by hand. Alternatively, use `connectivity.bicep` (below) to script it end to end.
 - **Permissions:** Contributor on the resource group; ability to create a Microsoft Entra app registration (for the token audience); a read-only login on each database.
+- **Outbound internet from the AVS workload segment** is *not* required, but the SDDC must be able to route the segment over ExpressRoute. If your VMs need internet for setup (e.g. installing SQL Server), enable it on the private cloud first.
 
 ---
 
@@ -34,18 +35,24 @@ The agent calls an **MCP server** hosted on a **VNet-integrated Azure Container 
 # 0. Make sure you have a VNet connected to AVS (skip if you already do).
 #    EASIEST: AVS private cloud -> Connectivity -> "Azure vNet connect" -> create or
 #    select a VNet (it needs a GatewaySubnet); AVS wires up ExpressRoute for you.
-#    OR script it (creates the gateway + connection, ~30-45 min):
-#      az deployment group create -g <your-rg> --template-file infra/connectivity.bicep `
+#    OR script it (creates the gateway + connection, ~30-45 min). NOTE: this creates an
+#    ExpressRoute authorization ON the private cloud, so it must be deployed into the
+#    private cloud's OWN resource group:
+#      az deployment group create -g <avs-private-cloud-rg> --template-file infra/connectivity.bicep `
 #        --parameters avsPrivateCloudName=<your-avs-private-cloud>
-#    Either way, pass that VNet as -ExistingVnetName below; main.bicep adds the
-#    delegated aca-subnet to it.
+#    connectivity.bicep ALSO creates the delegated aca-subnet, so if you used it, add
+#    -SkipAcaSubnet below. Otherwise main.bicep creates that subnet for you.
 
 # 1. Register your databases
 #    Edit app/sources.yaml with each database's host/port/database, engine type,
 #    username, and the Key Vault secret name that will hold its password.
 
 # 2. Deploy everything + build & push the MCP image (defaults to the bundled app/ folder)
+#    -Location matters when the resource group is in a different region than the VNet.
+#    -FoundryLocation lets Foundry live in a model-rich region (the agent reaches the
+#    MCP server over public HTTPS, so it does not have to sit next to AVS).
 ./infra/deploy.ps1 -ResourceGroup <your-rg> -ExistingVnetName <your-vnet> `
+             -Location <vnet-region> -FoundryLocation <model-region> `
              -SqlPassword (Read-Host 'DB password' -AsSecureString)
 ```
 
@@ -53,12 +60,14 @@ Then finish the **manual steps** below.
 
 ### Other ways to deploy the infra
 ```powershell
-# Bicep + params file
+# Bicep + params file  (requires az CLI >= 2.53.0 - older CLIs don't understand .bicepparam
+# and fail with "Chose only one of --template-file FILE | --template-uri URI")
 az deployment group create -g <rg> --parameters infra/main.bicepparam --parameters sqlPassword=<pwd>
 
-# Pure ARM JSON
+# Pure ARM JSON  (no Bicep tooling needed; main.json is generated from main.bicep,
+# so regenerate it with `az bicep build --file main.bicep --outfile main.json` if you edit the Bicep)
 az deployment group create -g <rg> --template-file infra/main.json `
-  --parameters existingVnetName=<vnet> sqlPassword=<pwd>
+  --parameters existingVnetName=<vnet> sqlPassword=<pwd> location=<vnet-region>
 ```
 
 ---
@@ -101,12 +110,16 @@ az deployment group create -g <rg> --template-file infra/main.json `
 |---|---|---|
 | `existingVnetName` | *(required)* | Your VNet with ExpressRoute to AVS |
 | `acaSubnetPrefix` | `10.40.8.0/23` | Free /23 for the bridge subnet |
+| `createAcaSubnet` | `true` | Set **false** if `connectivity.bicep` already created `aca-subnet` — otherwise this template re-writes it, and a mismatched prefix silently reconfigures or fails it |
 | `sqlPassword` | *(required, secure)* | Read-only DB password → Key Vault |
 | `namePrefix` | `avsai` | Resource name prefix |
+| `location` | RG location | Put this in the **VNet's** region |
+| `foundryLocation` | `location` | Foundry may live elsewhere — the agent reaches the MCP server over public HTTPS. Use this when the AVS region has no GPT models (e.g. `westus2`) |
 | `containerImage` | public placeholder | Swapped to your image by `deploy.ps1` |
 | `deployFoundry` | `true` | Also create a Foundry account + model |
-| `modelName` / `modelVersion` | `gpt-4o-mini` / `2024-07-18` | Model deployment |
+| `modelName` / `modelVersion` | `gpt-5.4-mini` / `2026-03-17` | **Verify before deploying:** model availability *and lifecycle* vary by region, and a model whose `lifecycleStatus` is `Deprecating` is rejected for **new** deployments even where it still runs. Check with `az cognitiveservices model list -l <foundryLocation> --query "[?model.name=='<name>'].{v:model.version,s:model.lifecycleStatus,sku:model.skus[].name}"` |
 | `allowedAudiences` / `allowedCallers` | `''` | Set after the agent exists (see step 4) |
+| `discoveryMode` | `false` | Temporarily accept any valid Entra token so you can read the caller `azp` from the logs. **Never leave this on.** |
 
 ### `app/sources.yaml`
 Register each database the agent may read. The `type` selects the driver:
@@ -126,15 +139,24 @@ Uncomment the driver in `app/requirements.txt` (`psycopg2-binary`, `pymysql`, `o
 ---
 
 ## Security model
-- **Read-only** — only `SELECT`/`WITH`; DML/DDL blocked; results row-capped per source.
-- **No secrets in code** — DB passwords live in Key Vault; the app reads them with its managed identity.
-- **Managed-identity auth** — the agent presents an Entra token; the server validates signature, audience, issuer, and caller (`azp`).
+- **Read-only** — only `SELECT`/`WITH`; DML/DDL blocked; results row-capped per source. Back this with a genuinely read-only DB login (`db_datareader`) so the database enforces it too.
+- **No secrets in code** — DB passwords live in Key Vault; the app reads them with its user-assigned managed identity and caches them for `SECRET_TTL_SECONDS` (default 1h) so rotations converge.
+- **Managed-identity auth** — the agent presents an Entra token; the server validates signature, audience, issuer, and caller (`azp`) on **every** request.
+- **Fails closed** — the ingress is internet-facing, so an unset `ALLOWED_CALLERS` must never mean "allow anyone". With no allow-list the server returns `503` until you either set `ALLOWED_CALLERS` or *explicitly* opt into `discoveryMode`. Discovery mode still requires a valid, signature-verified Entra token from your tenant; it only relaxes the caller allow-list. Turn it off once you've read the `azp`.
 - **Private** — reaches AVS over ExpressRoute; databases are never exposed to the internet.
+- **Transport** — connections use `Encrypt=yes`, but default to `TrustServerCertificate=yes` because AVS workload VMs typically present self-signed SQL certificates. That encrypts the link without authenticating the server; set `SQL_TRUST_SERVER_CERT=false` once your databases use a trusted certificate.
 
 ---
 
 ## Troubleshooting
-- **`401 unauthorized` after locking:** the token's `azp` doesn't match `ALLOWED_CALLERS`. Re-check the discovery log line, or temporarily clear `ALLOWED_CALLERS` to re-enter discovery mode.
-- **App won't pull the image:** the `AcrPull` role is granted to the app's managed identity by the template; if you changed the ACR, re-assign it.
+- **`503` / "server is not locked down":** `ALLOWED_CALLERS` is empty and discovery mode is off. This is deliberate — set `allowedCallers`, or deploy once with `discoveryMode=true` to learn the `azp`.
+- **`401 unauthorized` after locking:** the token's `azp` doesn't match `ALLOWED_CALLERS`. Re-check the discovery log line, or redeploy with `discoveryMode=true` to re-enter discovery.
+- **Container App stuck `InProgress` with no revisions:** almost always the image pull. The template uses a **user-assigned** identity precisely so `AcrPull` exists *before* the app is created; a system-assigned identity deadlocks (the role assignment needs the app's principal, the app needs the role to start).
+- **`ModuleNotFoundError: No module named 'mcp.server.fastmcp'`:** you built with an unpinned MCP SDK. `requirements.txt` pins `mcp[cli]<2` because the 2.x SDK renamed `FastMCP`.
+- **No container logs anywhere:** the environment must have `appLogsConfiguration`. The template creates a Log Analytics workspace and wires it up; a revision created *before* that config was added must be restarted to start shipping logs. Query with:
+  `az monitor log-analytics query -w <workspaceGuid> --analytics-query "ContainerAppConsoleLogs_CL | where ContainerAppName_s == '<app>' | order by TimeGenerated desc | take 50"`
+- **`az acr build` fails on Windows with `UnicodeEncodeError`:** a client-side log-streaming bug (colorama/cp1252). **The server-side build usually succeeded** — confirm with `az acr repository show-tags -n <acr> --repository avs-mcp` before rebuilding. `deploy.ps1` sets `PYTHONIOENCODING=utf-8` and verifies the tag rather than aborting.
+- **`az containerapp` errors mentioning `WorkloadProfilePropertyNotSupportedInApiVersion`, or `workloadProfiles` showing as `null`:** your Azure CLI is too old (see Prerequisites). Upgrade, or read the app through `az rest ... --api-version 2024-03-01`.
+- **Cancelling a stuck deployment doesn't help:** cancelling the ARM deployment does **not** cancel the underlying Container Apps operation. Later deploys then fail with `ContainerAppOperationInProgress`; wait for it to settle, then delete the app and redeploy.
 - **`Query error: Invalid column/object name`:** the agent guessed a name — its instructions tell it to call `get_schema` first; the server also returns the available objects as a hint.
 - **Connectivity deploy is slow:** the ExpressRoute gateway in `connectivity.bicep` takes ~30-45 minutes. This is expected and one-time.

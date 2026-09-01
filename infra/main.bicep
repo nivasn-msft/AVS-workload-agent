@@ -49,6 +49,9 @@ param existingVnetName string
 @description('Name of the delegated subnet to create for Container Apps.')
 param acaSubnetName string = 'aca-subnet'
 
+@description('Create the delegated Container Apps subnet. Set to FALSE when you already created it with connectivity.bicep, which also creates a subnet named "aca-subnet" -- otherwise this template re-writes that subnet and a mismatched acaSubnetPrefix will silently reconfigure or fail it.')
+param createAcaSubnet bool = true
+
 @description('Address prefix for the delegated Container Apps subnet (must fit inside the existing VNet and be at least /23).')
 param acaSubnetPrefix string = '10.40.8.0/23'
 
@@ -74,14 +77,23 @@ param allowedCallers string = ''
 @description('Also deploy an Azure AI Foundry (AIServices) account + model deployment.')
 param deployFoundry bool = true
 
-@description('Model to deploy in Foundry (only used when deployFoundry = true).')
-param modelName string = 'gpt-4o-mini'
+@description('Location for the Foundry account. Defaults to the main location, but the agent reaches the MCP server over public HTTPS, so Foundry can live in a model-rich region when the AVS region has no GPT models (e.g. westus2).')
+param foundryLocation string = location
+
+@description('Model to deploy in Foundry (only used when deployFoundry = true). Model availability AND lifecycle vary by region: a model in a "Deprecating" state is rejected for new deployments. Check `az cognitiveservices model list -l <foundryLocation>` before deploying.')
+param modelName string = 'gpt-5.4-mini'
 
 @description('Version of the model to deploy.')
-param modelVersion string = '2024-07-18'
+param modelVersion string = '2026-03-17'
+
+@description('Temporarily allow any validly-authenticated Entra caller so you can read the caller azp from the logs and then populate allowedCallers. Never leave this on: it disables the caller allow-list (it does NOT disable token validation).')
+param discoveryMode bool = false
 
 // ---- names -----------------------------------------------------------------
-var kvName = '${namePrefix}-kv'
+// Key Vault names are GLOBALLY unique across all of Azure, so a bare '<prefix>-kv'
+// collides with other tenants' vaults (and soft-delete keeps deleted names reserved).
+// 24 chars is the hard limit.
+var kvName = take('${namePrefix}-kv-${uniqueString(resourceGroup().id)}', 24)
 var acrName = '${namePrefix}acr${uniqueString(resourceGroup().id)}'
 var envName = '${namePrefix}-mcp-env'
 var appName = '${namePrefix}-mcp-server'
@@ -97,7 +109,7 @@ resource vnet 'Microsoft.Network/virtualNetworks@2023-11-01' existing = {
   name: existingVnetName
 }
 
-resource acaSubnet 'Microsoft.Network/virtualNetworks/subnets@2023-11-01' = {
+resource acaSubnet 'Microsoft.Network/virtualNetworks/subnets@2023-11-01' = if (createAcaSubnet) {
   parent: vnet
   name: acaSubnetName
   properties: {
@@ -111,6 +123,21 @@ resource acaSubnet 'Microsoft.Network/virtualNetworks/subnets@2023-11-01' = {
       }
     ]
   }
+}
+
+// Resolve the subnet id either way. A conditional resource's .id is still valid to
+// reference, but reading it when the condition is false yields a placeholder, so
+// build the id from the parent instead.
+var acaSubnetId = '${vnet.id}/subnets/${acaSubnetName}'
+
+// ---- User-assigned identity -------------------------------------------------
+// Created up front so AcrPull / Key Vault roles can be granted BEFORE the app starts.
+// A system-assigned identity cannot work here: the app needs AcrPull to pull its image,
+// but the role assignment would depend on the app's own principalId -- a deadlock that
+// leaves the app stuck in InProgress forever.
+resource uami 'Microsoft.ManagedIdentity/userAssignedIdentities@2023-01-31' = {
+  name: '${namePrefix}-mcp-identity'
+  location: location
 }
 
 // ---- Azure Container Registry -----------------------------------------------
@@ -149,14 +176,48 @@ resource sqlSecret 'Microsoft.KeyVault/vaults/secrets@2023-07-01' = {
 }
 
 // ---- Container Apps environment (VNet-integrated) --------------------------
+// ---- Log Analytics ----------------------------------------------------------
+// Without a log destination the container's stdout is discarded: crashes are
+// undiagnosable AND the documented "read the caller azp from the logs" discovery
+// workflow is impossible, because that azp line is printed to stdout.
+resource law 'Microsoft.OperationalInsights/workspaces@2023-09-01' = {
+  name: '${namePrefix}-logs'
+  location: location
+  properties: {
+    sku: {
+      name: 'PerGB2018'
+    }
+    retentionInDays: 30
+  }
+}
+
+// The infrastructure subnet is delegated to Microsoft.App/environments, which requires a
+// workload-profiles environment. A Consumption-only (V1) environment rejects delegated subnets.
 resource env 'Microsoft.App/managedEnvironments@2024-03-01' = {
   name: envName
   location: location
+  // Referencing acaSubnetId as a string loses the implicit dependency, so declare it.
+  dependsOn: [
+    acaSubnet
+  ]
   properties: {
+    appLogsConfiguration: {
+      destination: 'log-analytics'
+      logAnalyticsConfiguration: {
+        customerId: law.properties.customerId
+        sharedKey: law.listKeys().primarySharedKey
+      }
+    }
     vnetConfiguration: {
-      infrastructureSubnetId: acaSubnet.id
+      infrastructureSubnetId: acaSubnetId
       internal: false
     }
+    workloadProfiles: [
+      {
+        name: 'Consumption'
+        workloadProfileType: 'Consumption'
+      }
+    ]
   }
 }
 
@@ -165,10 +226,19 @@ resource app 'Microsoft.App/containerApps@2024-03-01' = {
   name: appName
   location: location
   identity: {
-    type: 'SystemAssigned'
+    type: 'UserAssigned'
+    userAssignedIdentities: {
+      '${uami.id}': {}
+    }
   }
+  dependsOn: [
+    acrRoleAssignment
+    kvRoleAssignment
+  ]
   properties: {
     managedEnvironmentId: env.id
+    // Must match a profile defined on the environment, otherwise the app never schedules.
+    workloadProfileName: 'Consumption'
     configuration: {
       ingress: {
         external: true
@@ -178,7 +248,7 @@ resource app 'Microsoft.App/containerApps@2024-03-01' = {
       registries: [
         {
           server: acr.properties.loginServer
-          identity: 'system'
+          identity: uami.id
         }
       ]
     }
@@ -199,6 +269,9 @@ resource app 'Microsoft.App/containerApps@2024-03-01' = {
             { name: 'TENANT_ID', value: tenantId }
             { name: 'ALLOWED_AUDIENCES', value: allowedAudiences }
             { name: 'ALLOWED_CALLERS', value: allowedCallers }
+            { name: 'DISCOVERY_MODE', value: string(discoveryMode) }
+            // Tells DefaultAzureCredential which identity to use for Key Vault.
+            { name: 'AZURE_CLIENT_ID', value: uami.properties.clientId }
           ]
         }
       ]
@@ -211,22 +284,23 @@ resource app 'Microsoft.App/containerApps@2024-03-01' = {
 }
 
 // ---- RBAC: app managed identity -> Key Vault Secrets User + AcrPull ---------
+// Scoped to the user-assigned identity so both roles exist before the app is created.
 resource kvRoleAssignment 'Microsoft.Authorization/roleAssignments@2022-04-01' = {
-  name: guid(kv.id, app.id, kvSecretsUserRoleId)
+  name: guid(kv.id, uami.id, kvSecretsUserRoleId)
   scope: kv
   properties: {
     roleDefinitionId: kvSecretsUserRoleId
-    principalId: app.identity.principalId
+    principalId: uami.properties.principalId
     principalType: 'ServicePrincipal'
   }
 }
 
 resource acrRoleAssignment 'Microsoft.Authorization/roleAssignments@2022-04-01' = {
-  name: guid(acr.id, app.id, acrPullRoleId)
+  name: guid(acr.id, uami.id, acrPullRoleId)
   scope: acr
   properties: {
     roleDefinitionId: acrPullRoleId
-    principalId: app.identity.principalId
+    principalId: uami.properties.principalId
     principalType: 'ServicePrincipal'
   }
 }
@@ -234,7 +308,7 @@ resource acrRoleAssignment 'Microsoft.Authorization/roleAssignments@2022-04-01' 
 // ---- (optional) Azure AI Foundry account + model deployment ----------------
 resource foundry 'Microsoft.CognitiveServices/accounts@2024-10-01' = if (deployFoundry) {
   name: foundryName
-  location: location
+  location: foundryLocation
   kind: 'AIServices'
   sku: {
     name: 'S0'
@@ -270,5 +344,7 @@ output acrLoginServer string = acr.properties.loginServer
 output mcpFqdn string = app.properties.configuration.ingress.fqdn
 output mcpEndpoint string = 'https://${app.properties.configuration.ingress.fqdn}/mcp'
 output keyVaultUri string = kv.properties.vaultUri
-output appPrincipalId string = app.identity.principalId
+output keyVaultName string = kv.name
+output appPrincipalId string = uami.properties.principalId
+output appClientId string = uami.properties.clientId
 output foundryEndpoint string = deployFoundry ? foundry!.properties.endpoint : ''

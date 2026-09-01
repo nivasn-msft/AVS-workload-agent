@@ -8,19 +8,27 @@ container's managed identity. Requests to /mcp are validated as Microsoft Entra
 tokens from your Foundry agent.
 
 Environment variables:
-  KEY_VAULT_URL      required. https://<vault>.vault.azure.net/
-  SQL_USER           fallback DB username if a source omits one (default: agentreader)
-  HOST / PORT        listen address (default 0.0.0.0:8000)
-  TENANT_ID          Entra tenant used to validate tokens
-  ALLOWED_AUDIENCES  comma-separated allowed token audiences (your app registration)
-  ALLOWED_CALLERS    comma-separated allowed caller app ids (azp) = your Foundry agent.
-                     If EMPTY, the server runs in DISCOVERY mode: it logs each caller's
-                     azp so you can find it, then set ALLOWED_CALLERS to lock the endpoint.
+  KEY_VAULT_URL          required. https://<vault>.vault.azure.net/
+  SQL_USER               fallback DB username if a source omits one (default: agentreader)
+  HOST / PORT            listen address (default 0.0.0.0:8000)
+  TENANT_ID              Entra tenant used to validate tokens
+  ALLOWED_AUDIENCES      comma-separated allowed token audiences (your app registration)
+  ALLOWED_CALLERS        comma-separated allowed caller app ids (azp) = your Foundry agent.
+                         If EMPTY, the endpoint FAILS CLOSED (503) unless DISCOVERY_MODE
+                         is explicitly enabled.
+  DISCOVERY_MODE         true/false (default false). Temporarily skips ONLY the caller
+                         allow-list so the caller's azp can be logged and copied into
+                         ALLOWED_CALLERS. Tokens are still fully validated (signature,
+                         issuer, audience). Never leave this on: ingress is internet-facing.
+  SQL_TRUST_SERVER_CERT  true/false (default true). Trusts self-signed SQL certificates,
+                         which AVS workload VMs typically use. Set false once your
+                         databases present a trusted certificate.
+  SECRET_TTL_SECONDS     how long Key Vault secrets are cached (default 3600), so a
+                         rotated password is picked up without restarting the container.
 """
-import base64
 import fnmatch
-import json
 import os
+import time
 from functools import lru_cache
 
 import jwt
@@ -43,6 +51,9 @@ SQL_USER = os.getenv("SQL_USER", "agentreader")
 TENANT_ID = os.getenv("TENANT_ID", "")
 ALLOWED_AUDIENCES = [a for a in os.getenv("ALLOWED_AUDIENCES", "").split(",") if a]
 ALLOWED_CALLERS = {c for c in os.getenv("ALLOWED_CALLERS", "").split(",") if c}
+# Discovery must be an explicit, deliberate choice. An unset allow-list must never
+# silently mean "allow everyone" on an internet-facing endpoint.
+DISCOVERY_MODE = os.getenv("DISCOVERY_MODE", "").strip().lower() in ("1", "true", "yes")
 ALLOWED_ISSUERS = {
     f"https://login.microsoftonline.com/{TENANT_ID}/v2.0",
     f"https://sts.windows.net/{TENANT_ID}/",
@@ -55,15 +66,32 @@ with open("sources.yaml") as f:
 
 _kv = SecretClient(vault_url=KEY_VAULT_URL, credential=DefaultAzureCredential())
 
+# Secrets are cached so every query does not hit Key Vault, but an unbounded cache means
+# a rotated password is never picked up until the container is restarted. Cache with a TTL
+# so rotation converges on its own.
+SECRET_TTL_SECONDS = int(os.getenv("SECRET_TTL_SECONDS", "3600"))
+_secret_cache: dict[str, tuple[float, str]] = {}
 
-@lru_cache
+
 def _secret(name: str) -> str:
-    return _kv.get_secret(name).value
+    hit = _secret_cache.get(name)
+    now = time.monotonic()
+    if hit and (now - hit[0]) < SECRET_TTL_SECONDS:
+        return hit[1]
+    value = _kv.get_secret(name).value
+    _secret_cache[name] = (now, value)
+    return value
 
+
+# TrustServerCertificate=yes encrypts the connection but does NOT authenticate the server.
+# AVS workload VMs usually present self-signed SQL certificates, so it is the pragmatic
+# default here; set SQL_TRUST_SERVER_CERT=false once your databases use a trusted cert.
+_TRUST_SERVER_CERT = os.getenv("SQL_TRUST_SERVER_CERT", "true").strip().lower() in ("1", "true", "yes")
 
 _DIALECTS = {
     "mssql": ("mssql+pyodbc", {"driver": "ODBC Driver 18 for SQL Server",
-                                "Encrypt": "yes", "TrustServerCertificate": "yes"}),
+                                "Encrypt": "yes",
+                                "TrustServerCertificate": "yes" if _TRUST_SERVER_CERT else "no"}),
     "postgresql": ("postgresql+psycopg2", {}),
     "mysql": ("mysql+pymysql", {}),
     "oracle": ("oracle+oracledb", {}),
@@ -86,7 +114,8 @@ def _engine(source: str):
         database=s["connection"]["database"],
         query=query,
     )
-    return create_engine(url, pool_pre_ping=True)
+    # pool_recycle keeps pooled connections from outliving a password rotation forever.
+    return create_engine(url, pool_pre_ping=True, pool_recycle=SECRET_TTL_SECONDS)
 
 
 def _gov(source: str) -> dict:
@@ -158,8 +187,12 @@ def run_query(source: str, query: str) -> str:
 
 class AuthMiddleware:
     """Validate the Entra token on /mcp.
-    DISCOVERY mode (ALLOWED_CALLERS empty): log the caller azp, then allow.
-    ENFORCED mode: require signature (JWKS) + audience + issuer + caller in the allow-list."""
+    Every request must carry a valid, signature-verified Entra token.
+    DISCOVERY mode (ALLOWED_CALLERS empty + DISCOVERY_MODE=true): the token is still
+    fully validated; only the caller allow-list check is skipped, and the caller's azp
+    is logged so the operator can populate ALLOWED_CALLERS.
+    ENFORCED mode: signature (JWKS) + audience + issuer + caller in the allow-list.
+    If ALLOWED_CALLERS is empty and DISCOVERY_MODE is off, the endpoint fails closed."""
     def __init__(self, app):
         self.app = app
 
@@ -169,22 +202,18 @@ class AuthMiddleware:
             auth = hdrs.get(b"authorization", b"").decode()
             token = auth[7:] if auth.lower().startswith("bearer ") else ""
 
-            if not ALLOWED_CALLERS:
-                # discovery: help the operator find the caller azp so they can lock the endpoint
-                if token:
-                    try:
-                        p = token.split(".")[1]
-                        p += "=" * (-len(p) % 4)
-                        c = json.loads(base64.urlsafe_b64decode(p))
-                        print(f"AUTH discovery: caller azp={c.get('azp') or c.get('appid')} "
-                              f"aud={c.get('aud')} -- set ALLOWED_CALLERS to this azp to lock the endpoint",
-                              flush=True)
-                    except Exception:
-                        pass
-                await self.app(scope, receive, send)
+            if not ALLOWED_CALLERS and not DISCOVERY_MODE:
+                print("AUTH deny: ALLOWED_CALLERS is empty and DISCOVERY_MODE is off", flush=True)
+                await JSONResponse(
+                    {"error": "server_not_configured",
+                     "detail": "Set ALLOWED_CALLERS to the calling application's azp. To learn "
+                               "it, set DISCOVERY_MODE=true temporarily -- discovery still "
+                               "requires a valid Entra token."},
+                    status_code=503)(scope, receive, send)
                 return
 
             reason = None
+            claims = {}
             if not token:
                 reason = "no bearer token"
             elif _jwks is None:
@@ -197,7 +226,7 @@ class AuthMiddleware:
                                         options={"verify_aud": bool(ALLOWED_AUDIENCES)})
                     if ALLOWED_ISSUERS and claims.get("iss") not in ALLOWED_ISSUERS:
                         reason = f"bad issuer {claims.get('iss')}"
-                    elif (claims.get("azp") or claims.get("appid")) not in ALLOWED_CALLERS:
+                    elif ALLOWED_CALLERS and (claims.get("azp") or claims.get("appid")) not in ALLOWED_CALLERS:
                         reason = "caller not allowed"
                 except Exception as e:
                     reason = f"invalid token: {e}"
@@ -205,6 +234,11 @@ class AuthMiddleware:
                 print(f"AUTH deny: {reason}", flush=True)
                 await JSONResponse({"error": "unauthorized"}, status_code=401)(scope, receive, send)
                 return
+            if not ALLOWED_CALLERS:
+                # Token is already fully validated here; discovery only skips the allow-list.
+                print(f"AUTH discovery: caller azp={claims.get('azp') or claims.get('appid')} "
+                      f"aud={claims.get('aud')} -- set ALLOWED_CALLERS to this azp to lock the endpoint",
+                      flush=True)
         await self.app(scope, receive, send)
 
 

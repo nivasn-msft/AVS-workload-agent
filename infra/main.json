@@ -5,7 +5,7 @@
     "_generator": {
       "name": "bicep",
       "version": "0.36.177.2456",
-      "templateHash": "8572246982355821433"
+      "templateHash": "13715581381637309057"
     }
   },
   "parameters": {
@@ -34,6 +34,13 @@
       "defaultValue": "aca-subnet",
       "metadata": {
         "description": "Name of the delegated subnet to create for Container Apps."
+      }
+    },
+    "createAcaSubnet": {
+      "type": "bool",
+      "defaultValue": true,
+      "metadata": {
+        "description": "Create the delegated Container Apps subnet. Set to FALSE when you already created it with connectivity.bicep, which also creates a subnet named \"aca-subnet\" -- otherwise this template re-writes that subnet and a mismatched acaSubnetPrefix will silently reconfigure or fail it."
       }
     },
     "acaSubnetPrefix": {
@@ -91,33 +98,49 @@
         "description": "Also deploy an Azure AI Foundry (AIServices) account + model deployment."
       }
     },
+    "foundryLocation": {
+      "type": "string",
+      "defaultValue": "[parameters('location')]",
+      "metadata": {
+        "description": "Location for the Foundry account. Defaults to the main location, but the agent reaches the MCP server over public HTTPS, so Foundry can live in a model-rich region when the AVS region has no GPT models (e.g. westus2)."
+      }
+    },
     "modelName": {
       "type": "string",
-      "defaultValue": "gpt-4o-mini",
+      "defaultValue": "gpt-5.4-mini",
       "metadata": {
-        "description": "Model to deploy in Foundry (only used when deployFoundry = true)."
+        "description": "Model to deploy in Foundry (only used when deployFoundry = true). Model availability AND lifecycle vary by region: a model in a \"Deprecating\" state is rejected for new deployments. Check `az cognitiveservices model list -l <foundryLocation>` before deploying."
       }
     },
     "modelVersion": {
       "type": "string",
-      "defaultValue": "2024-07-18",
+      "defaultValue": "2026-03-17",
       "metadata": {
         "description": "Version of the model to deploy."
+      }
+    },
+    "discoveryMode": {
+      "type": "bool",
+      "defaultValue": false,
+      "metadata": {
+        "description": "Temporarily allow any validly-authenticated Entra caller so you can read the caller azp from the logs and then populate allowedCallers. Never leave this on: it disables the caller allow-list (it does NOT disable token validation)."
       }
     }
   },
   "variables": {
-    "kvName": "[format('{0}-kv', parameters('namePrefix'))]",
+    "kvName": "[take(format('{0}-kv-{1}', parameters('namePrefix'), uniqueString(resourceGroup().id)), 24)]",
     "acrName": "[format('{0}acr{1}', parameters('namePrefix'), uniqueString(resourceGroup().id))]",
     "envName": "[format('{0}-mcp-env', parameters('namePrefix'))]",
     "appName": "[format('{0}-mcp-server', parameters('namePrefix'))]",
     "foundryName": "[format('{0}-foundry', parameters('namePrefix'))]",
     "secretName": "sql-agentreader-password",
     "kvSecretsUserRoleId": "[subscriptionResourceId('Microsoft.Authorization/roleDefinitions', '4633458b-17de-408a-b874-0445c86b69e6')]",
-    "acrPullRoleId": "[subscriptionResourceId('Microsoft.Authorization/roleDefinitions', '7f951dda-4ed3-4680-a7ca-43fe172d538d')]"
+    "acrPullRoleId": "[subscriptionResourceId('Microsoft.Authorization/roleDefinitions', '7f951dda-4ed3-4680-a7ca-43fe172d538d')]",
+    "acaSubnetId": "[format('{0}/subnets/{1}', resourceId('Microsoft.Network/virtualNetworks', parameters('existingVnetName')), parameters('acaSubnetName'))]"
   },
   "resources": [
     {
+      "condition": "[parameters('createAcaSubnet')]",
       "type": "Microsoft.Network/virtualNetworks/subnets",
       "apiVersion": "2023-11-01",
       "name": "[format('{0}/{1}', parameters('existingVnetName'), parameters('acaSubnetName'))]",
@@ -132,6 +155,12 @@
           }
         ]
       }
+    },
+    {
+      "type": "Microsoft.ManagedIdentity/userAssignedIdentities",
+      "apiVersion": "2023-01-31",
+      "name": "[format('{0}-mcp-identity', parameters('namePrefix'))]",
+      "location": "[parameters('location')]"
     },
     {
       "type": "Microsoft.ContainerRegistry/registries",
@@ -172,18 +201,44 @@
       ]
     },
     {
+      "type": "Microsoft.OperationalInsights/workspaces",
+      "apiVersion": "2023-09-01",
+      "name": "[format('{0}-logs', parameters('namePrefix'))]",
+      "location": "[parameters('location')]",
+      "properties": {
+        "sku": {
+          "name": "PerGB2018"
+        },
+        "retentionInDays": 30
+      }
+    },
+    {
       "type": "Microsoft.App/managedEnvironments",
       "apiVersion": "2024-03-01",
       "name": "[variables('envName')]",
       "location": "[parameters('location')]",
       "properties": {
+        "appLogsConfiguration": {
+          "destination": "log-analytics",
+          "logAnalyticsConfiguration": {
+            "customerId": "[reference(resourceId('Microsoft.OperationalInsights/workspaces', format('{0}-logs', parameters('namePrefix'))), '2023-09-01').customerId]",
+            "sharedKey": "[listKeys(resourceId('Microsoft.OperationalInsights/workspaces', format('{0}-logs', parameters('namePrefix'))), '2023-09-01').primarySharedKey]"
+          }
+        },
         "vnetConfiguration": {
-          "infrastructureSubnetId": "[resourceId('Microsoft.Network/virtualNetworks/subnets', parameters('existingVnetName'), parameters('acaSubnetName'))]",
+          "infrastructureSubnetId": "[variables('acaSubnetId')]",
           "internal": false
-        }
+        },
+        "workloadProfiles": [
+          {
+            "name": "Consumption",
+            "workloadProfileType": "Consumption"
+          }
+        ]
       },
       "dependsOn": [
-        "[resourceId('Microsoft.Network/virtualNetworks/subnets', parameters('existingVnetName'), parameters('acaSubnetName'))]"
+        "[resourceId('Microsoft.Network/virtualNetworks/subnets', parameters('existingVnetName'), parameters('acaSubnetName'))]",
+        "[resourceId('Microsoft.OperationalInsights/workspaces', format('{0}-logs', parameters('namePrefix')))]"
       ]
     },
     {
@@ -192,10 +247,14 @@
       "name": "[variables('appName')]",
       "location": "[parameters('location')]",
       "identity": {
-        "type": "SystemAssigned"
+        "type": "UserAssigned",
+        "userAssignedIdentities": {
+          "[format('{0}', resourceId('Microsoft.ManagedIdentity/userAssignedIdentities', format('{0}-mcp-identity', parameters('namePrefix'))))]": {}
+        }
       },
       "properties": {
         "managedEnvironmentId": "[resourceId('Microsoft.App/managedEnvironments', variables('envName'))]",
+        "workloadProfileName": "Consumption",
         "configuration": {
           "ingress": {
             "external": true,
@@ -205,7 +264,7 @@
           "registries": [
             {
               "server": "[reference(resourceId('Microsoft.ContainerRegistry/registries', variables('acrName')), '2023-07-01').loginServer]",
-              "identity": "system"
+              "identity": "[resourceId('Microsoft.ManagedIdentity/userAssignedIdentities', format('{0}-mcp-identity', parameters('namePrefix')))]"
             }
           ]
         },
@@ -246,6 +305,14 @@
                 {
                   "name": "ALLOWED_CALLERS",
                   "value": "[parameters('allowedCallers')]"
+                },
+                {
+                  "name": "DISCOVERY_MODE",
+                  "value": "[string(parameters('discoveryMode'))]"
+                },
+                {
+                  "name": "AZURE_CLIENT_ID",
+                  "value": "[reference(resourceId('Microsoft.ManagedIdentity/userAssignedIdentities', format('{0}-mcp-identity', parameters('namePrefix'))), '2023-01-31').clientId]"
                 }
               ]
             }
@@ -258,38 +325,41 @@
       },
       "dependsOn": [
         "[resourceId('Microsoft.ContainerRegistry/registries', variables('acrName'))]",
+        "[extensionResourceId(resourceId('Microsoft.ContainerRegistry/registries', variables('acrName')), 'Microsoft.Authorization/roleAssignments', guid(resourceId('Microsoft.ContainerRegistry/registries', variables('acrName')), resourceId('Microsoft.ManagedIdentity/userAssignedIdentities', format('{0}-mcp-identity', parameters('namePrefix'))), variables('acrPullRoleId')))]",
         "[resourceId('Microsoft.App/managedEnvironments', variables('envName'))]",
-        "[resourceId('Microsoft.KeyVault/vaults', variables('kvName'))]"
+        "[resourceId('Microsoft.KeyVault/vaults', variables('kvName'))]",
+        "[extensionResourceId(resourceId('Microsoft.KeyVault/vaults', variables('kvName')), 'Microsoft.Authorization/roleAssignments', guid(resourceId('Microsoft.KeyVault/vaults', variables('kvName')), resourceId('Microsoft.ManagedIdentity/userAssignedIdentities', format('{0}-mcp-identity', parameters('namePrefix'))), variables('kvSecretsUserRoleId')))]",
+        "[resourceId('Microsoft.ManagedIdentity/userAssignedIdentities', format('{0}-mcp-identity', parameters('namePrefix')))]"
       ]
     },
     {
       "type": "Microsoft.Authorization/roleAssignments",
       "apiVersion": "2022-04-01",
       "scope": "[format('Microsoft.KeyVault/vaults/{0}', variables('kvName'))]",
-      "name": "[guid(resourceId('Microsoft.KeyVault/vaults', variables('kvName')), resourceId('Microsoft.App/containerApps', variables('appName')), variables('kvSecretsUserRoleId'))]",
+      "name": "[guid(resourceId('Microsoft.KeyVault/vaults', variables('kvName')), resourceId('Microsoft.ManagedIdentity/userAssignedIdentities', format('{0}-mcp-identity', parameters('namePrefix'))), variables('kvSecretsUserRoleId'))]",
       "properties": {
         "roleDefinitionId": "[variables('kvSecretsUserRoleId')]",
-        "principalId": "[reference(resourceId('Microsoft.App/containerApps', variables('appName')), '2024-03-01', 'full').identity.principalId]",
+        "principalId": "[reference(resourceId('Microsoft.ManagedIdentity/userAssignedIdentities', format('{0}-mcp-identity', parameters('namePrefix'))), '2023-01-31').principalId]",
         "principalType": "ServicePrincipal"
       },
       "dependsOn": [
-        "[resourceId('Microsoft.App/containerApps', variables('appName'))]",
-        "[resourceId('Microsoft.KeyVault/vaults', variables('kvName'))]"
+        "[resourceId('Microsoft.KeyVault/vaults', variables('kvName'))]",
+        "[resourceId('Microsoft.ManagedIdentity/userAssignedIdentities', format('{0}-mcp-identity', parameters('namePrefix')))]"
       ]
     },
     {
       "type": "Microsoft.Authorization/roleAssignments",
       "apiVersion": "2022-04-01",
       "scope": "[format('Microsoft.ContainerRegistry/registries/{0}', variables('acrName'))]",
-      "name": "[guid(resourceId('Microsoft.ContainerRegistry/registries', variables('acrName')), resourceId('Microsoft.App/containerApps', variables('appName')), variables('acrPullRoleId'))]",
+      "name": "[guid(resourceId('Microsoft.ContainerRegistry/registries', variables('acrName')), resourceId('Microsoft.ManagedIdentity/userAssignedIdentities', format('{0}-mcp-identity', parameters('namePrefix'))), variables('acrPullRoleId'))]",
       "properties": {
         "roleDefinitionId": "[variables('acrPullRoleId')]",
-        "principalId": "[reference(resourceId('Microsoft.App/containerApps', variables('appName')), '2024-03-01', 'full').identity.principalId]",
+        "principalId": "[reference(resourceId('Microsoft.ManagedIdentity/userAssignedIdentities', format('{0}-mcp-identity', parameters('namePrefix'))), '2023-01-31').principalId]",
         "principalType": "ServicePrincipal"
       },
       "dependsOn": [
         "[resourceId('Microsoft.ContainerRegistry/registries', variables('acrName'))]",
-        "[resourceId('Microsoft.App/containerApps', variables('appName'))]"
+        "[resourceId('Microsoft.ManagedIdentity/userAssignedIdentities', format('{0}-mcp-identity', parameters('namePrefix')))]"
       ]
     },
     {
@@ -297,7 +367,7 @@
       "type": "Microsoft.CognitiveServices/accounts",
       "apiVersion": "2024-10-01",
       "name": "[variables('foundryName')]",
-      "location": "[parameters('location')]",
+      "location": "[parameters('foundryLocation')]",
       "kind": "AIServices",
       "sku": {
         "name": "S0"
@@ -352,9 +422,17 @@
       "type": "string",
       "value": "[reference(resourceId('Microsoft.KeyVault/vaults', variables('kvName')), '2023-07-01').vaultUri]"
     },
+    "keyVaultName": {
+      "type": "string",
+      "value": "[variables('kvName')]"
+    },
     "appPrincipalId": {
       "type": "string",
-      "value": "[reference(resourceId('Microsoft.App/containerApps', variables('appName')), '2024-03-01', 'full').identity.principalId]"
+      "value": "[reference(resourceId('Microsoft.ManagedIdentity/userAssignedIdentities', format('{0}-mcp-identity', parameters('namePrefix'))), '2023-01-31').principalId]"
+    },
+    "appClientId": {
+      "type": "string",
+      "value": "[reference(resourceId('Microsoft.ManagedIdentity/userAssignedIdentities', format('{0}-mcp-identity', parameters('namePrefix'))), '2023-01-31').clientId]"
     },
     "foundryEndpoint": {
       "type": "string",
