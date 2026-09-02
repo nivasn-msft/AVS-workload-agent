@@ -108,11 +108,30 @@ az deployment group create -g <rg> --template-file infra/main.json `
          "server_url": "<mcpEndpoint output>",
          "allowed_tools": ["list_sources", "get_schema", "run_query"],
          "require_approval": "never",
-         "authorization": "<access token WITHOUT the 'Bearer ' prefix>"
+         "project_connection_id": "avs-mcp-auth"   // recommended; see below
        }]
      }
    }
    ```
+
+   There are two ways to give that tool a credential:
+
+   **a. A project connection (recommended)** — the credential lives on the project, not in
+   the agent definition, so you can rotate it without touching the agent. Create a
+   **CustomKeys** connection whose `target` is the MCP endpoint; the **key name is the HTTP
+   header name** and the value is sent **verbatim**, so the `Bearer ` prefix belongs here:
+   ```jsonc
+   PUT {armId}/projects/{project}/connections/avs-mcp-auth?api-version=2025-06-01
+   { "properties": {
+       "category": "CustomKeys", "authType": "CustomKeys",
+       "target": "<mcpEndpoint output>",
+       "credentials": { "keys": { "Authorization": "Bearer <access token>" } } } }
+   ```
+   Then reference it by name (or full ARM ID) in `project_connection_id`, as shown above.
+
+   **b. Inline** — set `"authorization": "<access token>"` on the tool instead. Simpler for a
+   one-off test, but it puts a secret in the agent definition and you must re-create the
+   agent to rotate it.
 
    Then invoke it — note the unusual path, and that **`api-version` must be omitted**:
    ```jsonc
@@ -139,13 +158,17 @@ az deployment group create -g <rg> --template-file infra/main.json `
    ```
 
    Gotchas that cost real debugging time:
+   - **A newly created connection is not immediately usable.** Reference it too soon and the
+     runtime silently sends *no* credential — the server logs `AUTH deny: no bearer token`
+     and the run fails with `424`, which looks exactly like a misconfigured connection. Give
+     it a short pause after the `PUT` before the first run.
    - **`authorization` takes the bare token — Foundry adds `Bearer ` itself.** Passing
      `"Bearer eyJ…"` yields a doubled prefix and the server rejects it with
-     `invalid token: Invalid header padding`.
+     `invalid token: Invalid header padding`. Note this is the **opposite** convention to the
+     connection `keys` value above, which is sent verbatim and *does* need the prefix.
    - **`headers` is refused outright** at create time: *"Headers that can include sensitive
      information are not allowed in the headers property for MCP tools. Use
-     project_connection_id instead."* Store durable credentials in a **project connection**
-     and reference it with `project_connection_id`.
+     project_connection_id instead."* Use the connection route above.
    - **`audience` is accepted and stored by the create call but rejected at run time** with
      `Unknown parameter: 'tools[0].audience'`. Don't rely on it.
    - On the older `/assistants` surface, run-level `tool_resources.mcp[].headers` will **not**
@@ -157,8 +180,9 @@ az deployment group create -g <rg> --template-file infra/main.json `
      `MCP Connector error … Error retrieving tool list`. A `424` therefore means *"your tool
      has no working credential"*, not *"the server is down"*.
 
-   A raw token in `authorization` expires (typically ~1 hour) — fine for a demo, but for
-   anything lasting use a project connection or the portal's Entra / managed-identity option.
+   Whichever route you pick, an Entra access token expires (typically ~1 hour). With a
+   connection you refresh it in one place — re-`PUT` the connection — and every agent that
+   references it picks the new value up on the next run.
 
 4. **Lock the endpoint to your agent** (the server ships in *discovery mode* to make this painless):
    - Ask one test question in the playground. The server **logs the caller's identity**:
@@ -228,6 +252,8 @@ Uncomment the driver in `app/requirements.txt` (`psycopg2-binary`, `pymysql`, `o
 - **The agent you created isn't in the portal:** you almost certainly created it under `/assistants`. The portal lists the `/agents` collection — they are separate stores. Re-create it with `POST {project}/agents` (see step 3).
 - **Run fails with `MCP Connector error. Http status: 424 …` or `Server returned 424`:** Foundry reached the server but couldn't list tools — nearly always because the tool has **no working credential**, so it called anonymously and got the server's `401`. Confirm the direction from the server side: a `401` in the container logs means the request arrived; *no* log line at all means Foundry never called out.
 - **`AUTH deny: invalid token: Invalid header padding`:** you put `"Bearer …"` in the tool's `authorization` property. It takes the **bare token** — Foundry adds the `Bearer ` prefix itself.
+- **`AUTH deny: no bearer token` when the tool uses `project_connection_id`:** the connection was created moments earlier. The agent runtime resolves connections with a short lag; until it does, it calls anonymously and you get a `424`. Pause after the `PUT`, then re-run.
+- **`GET /agents/<name>` returns 404 right after deleting a *different* agent:** the collection is eventually consistent. Give it a moment before concluding the agent is gone.
 - **`Unknown parameter: 'tools[0].audience'` at run time,** even though the create call accepted `audience`: the management and runtime schemas disagree. Drop `audience`.
 - **Run fails with a bare `server_error` and nothing reaches the server:** you are passing a real Entra token in `tool_resources.mcp[].headers` on the older `/assistants` surface. Foundry blocks forwarding valid Entra tokens there — use `/agents` with `authorization`, or a project connection.
 - **`401 unauthorized` while the tool *is* configured:** the `aud` Foundry sends may be the **bare app ID**, not the `api://` URI. Put **both** forms in `ALLOWED_AUDIENCES` (`api://<appId>,<appId>`).
