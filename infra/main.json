@@ -5,7 +5,7 @@
     "_generator": {
       "name": "bicep",
       "version": "0.36.177.2456",
-      "templateHash": "12429241047086819498"
+      "templateHash": "14443619429877161825"
     }
   },
   "parameters": {
@@ -26,7 +26,7 @@
     "existingVnetName": {
       "type": "string",
       "metadata": {
-        "description": "Name of the EXISTING VNet that already has ExpressRoute connectivity to your AVS private cloud."
+        "description": "Name of the EXISTING VNet that can route to your AVS private cloud (Gen 1: a VNet with ExpressRoute connectivity; Gen 2: the private cloud's own VNet, or one peered to it)."
       }
     },
     "acaSubnetName": {

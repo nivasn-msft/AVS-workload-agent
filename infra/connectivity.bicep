@@ -1,6 +1,15 @@
 // =============================================================================
-//  OPTIONAL - VNet connectivity to your AVS private cloud
+//  OPTIONAL - VNet connectivity to your AVS private cloud   [AVS Gen 1 ONLY]
 // =============================================================================
+//  GENERATION: this template targets AVS **Gen 1**, whose private cloud is reached
+//  through a Microsoft-managed ExpressRoute circuit. It creates an ExpressRoute
+//  authorization on the private cloud and connects a gateway to
+//  properties.circuit.expressRouteID.
+//  On **Gen 2** the private cloud is injected directly into one of your own VNets,
+//  so there is no circuit to authorize and no gateway to build -- skip this template
+//  entirely and add the delegated Container Apps subnet to the private cloud's VNet
+//  (or a VNet peered to it), then run main.bicep against that VNet.
+//
 //  Run this ONLY if you do NOT already have a VNet connected to your AVS
 //  private cloud. TIP: the simplest option is the built-in AVS portal feature
 //  (AVS private cloud -> Connectivity -> "Azure vNet connect"), which wires up

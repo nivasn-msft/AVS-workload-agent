@@ -13,7 +13,7 @@ The agent calls an **MCP server** hosted on a **VNet-integrated Azure Container 
 | `infra/main.bicep` / `infra/main.json` | The app infrastructure (subnet, ACR, Key Vault, Container Apps, RBAC, optional Foundry) |
 | `infra/main.bicepparam` | Parameters file for `main.bicep` |
 | `infra/deploy.ps1` | One command: deploy infra → build/push the MCP image → point the app at it |
-| `infra/connectivity.bicep` | **Optional** — creates a VNet + ExpressRoute connection to your AVS private cloud (only if you don't already have one) |
+| `infra/connectivity.bicep` | **Optional, AVS Gen 1 only** — creates a VNet + ExpressRoute connection to your AVS private cloud (only if you don't already have one) |
 | `app/` | The MCP server: `Dockerfile`, `mcp_server.py`, `requirements.txt`, `sources.yaml` |
 | `docs/` | The technical blog (`blog.md`) and screenshots (`media/`) |
 
@@ -23,9 +23,23 @@ The agent calls an **MCP server** hosted on a **VNet-integrated Azure Container 
 
 - **Azure CLI** (`az`) — **version 2.53.0 or newer**, logged in and set to the target subscription (`az account set --subscription <id>`). Older CLIs pin the `Microsoft.App` API to `2022-10-01`, which predates Container Apps *workload profiles*: `az containerapp update` fails with `WorkloadProfilePropertyNotSupportedInApiVersion`, and `az containerapp show` reports `workloadProfiles: null` and an empty `workloadProfileName` **even when they are correctly set** — which makes triage actively misleading. Check with `az version`; upgrade with `az upgrade`. To inspect the app with a stale CLI, bypass it: `az rest --method get --url "<appResourceId>?api-version=2024-03-01"`.
 - **An AVS private cloud** with your databases on a workload segment.
-- **A VNet with ExpressRoute connectivity to AVS.** The simplest way is the built-in AVS **Azure vNet connect** feature (AVS private cloud → **Connectivity → Azure vNet connect**), which creates/selects a VNet with a `GatewaySubnet` and wires up ExpressRoute for you — no gateway to build by hand. Alternatively, use `connectivity.bicep` (below) to script it end to end.
+- **A VNet that can reach AVS.** On **Gen 1** that means ExpressRoute connectivity — the simplest way is the built-in AVS **Azure vNet connect** feature (AVS private cloud → **Connectivity → Azure vNet connect**), which creates/selects a VNet with a `GatewaySubnet` and wires up ExpressRoute for you; alternatively use `connectivity.bicep` (below) to script it end to end. On **Gen 2** the private cloud already lives in one of your VNets, so you just use that VNet (or one peered to it) — see [AVS Gen 1 and Gen 2](#avs-gen-1-and-gen-2) below.
 - **Permissions:** Contributor on the resource group; ability to create a Microsoft Entra app registration (for the token audience); a read-only login on each database.
 - **Outbound internet from the AVS workload segment** is *not* required, but the SDDC must be able to route the segment over ExpressRoute. If your VMs need internet for setup (e.g. installing SQL Server), enable it on the private cloud first.
+
+### AVS Gen 1 and Gen 2
+
+The agent, the MCP server and its auth are **generation-agnostic** — they only need IP reachability to your database VMs on their SQL port. `main.bicep` never references an AVS resource either; it takes the name of an existing VNet, so it deploys unchanged on both generations. Only the **networking you point it at** differs:
+
+| | Gen 1 | Gen 2 |
+|---|---|---|
+| How Azure reaches the private cloud | A Microsoft-managed **ExpressRoute circuit**; you connect a VNet with an ER gateway + authorization key | The private cloud is **injected into your own VNet**; no circuit or authorization key for Azure-side connectivity |
+| Where the delegated `aca-subnet` goes | Any VNet connected to that circuit | The private cloud's **own VNet**, or a VNet peered to it |
+| `infra/connectivity.bicep` | Use it (or *Azure vNet connect*) | **Doesn't apply** — skip it |
+
+`connectivity.bicep` is **Gen 1 only**: it creates an ExpressRoute authorization on the private cloud and connects a gateway to `properties.circuit.expressRouteID`. A Gen 2 private cloud has no such circuit to authorize, so on Gen 2 you skip that template entirely and simply add the delegated `aca-subnet` to the private cloud's VNet (Gen 2 requires that VNet to sit in the same resource group as the private cloud). AVS Gen 2 programs your NSX segment routes into that VNet automatically, so a Container App there can reach workload VMs with no gateway at all. If you instead place the subnet in a *peered* VNet, you may need route-table entries carrying the specific NSX segment prefixes rather than relying on the broader address space.
+
+> Validated end to end on **Gen 1** (`av36`). The Gen 2 path follows from the documented networking model but has not been exercised here.
 
 ---
 

@@ -13,7 +13,10 @@
 //
 //  PREREQUISITES (you already have these if you run AVS):
 //    - An AVS private cloud with your databases on a workload segment
-//    - A VNet with ExpressRoute connectivity to that AVS private cloud
+//    - A VNet that can route to that AVS private cloud. On Gen 1 that is a VNet with
+//      ExpressRoute connectivity; on Gen 2 it is the VNet the private cloud is
+//      deployed into (or one peered to it). This template is the same either way --
+//      it never references an AVS resource, only the VNet you name below.
 //
 //  DEPLOY:
 //    az deployment group create -g <your-rg> --template-file main.bicep \
@@ -43,7 +46,7 @@ param location string = resourceGroup().location
 @description('Short prefix used to name the resources.')
 param namePrefix string = 'avsai'
 
-@description('Name of the EXISTING VNet that already has ExpressRoute connectivity to your AVS private cloud.')
+@description('Name of the EXISTING VNet that can route to your AVS private cloud (Gen 1: a VNet with ExpressRoute connectivity; Gen 2: the private cloud\'s own VNet, or one peered to it).')
 param existingVnetName string
 
 @description('Name of the delegated subnet to create for Container Apps.')
