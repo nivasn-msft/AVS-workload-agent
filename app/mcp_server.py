@@ -12,14 +12,18 @@ Environment variables:
   SQL_USER               fallback DB username if a source omits one (default: agentreader)
   HOST / PORT            listen address (default 0.0.0.0:8000)
   TENANT_ID              Entra tenant used to validate tokens
-  ALLOWED_AUDIENCES      comma-separated allowed token audiences (your app registration)
+  ALLOWED_AUDIENCES      comma-separated allowed token audiences (your app registration).
+                         If EMPTY, audience validation is DISABLED -- tokens are still
+                         checked for signature and issuer, but not for what they were
+                         issued for. Set this.
   ALLOWED_CALLERS        comma-separated allowed caller app ids (azp) = your Foundry agent.
                          If EMPTY, the endpoint FAILS CLOSED (503) unless DISCOVERY_MODE
                          is explicitly enabled.
   DISCOVERY_MODE         true/false (default false). Temporarily skips ONLY the caller
                          allow-list so the caller's azp can be logged and copied into
-                         ALLOWED_CALLERS. Tokens are still fully validated (signature,
-                         issuer, audience). Never leave this on: ingress is internet-facing.
+                         ALLOWED_CALLERS. Signature and issuer are still verified (and the
+                         audience too, if ALLOWED_AUDIENCES is set). Never leave this on:
+                         ingress is internet-facing.
   SQL_TRUST_SERVER_CERT  true/false (default true). Trusts self-signed SQL certificates,
                          which AVS workload VMs typically use. Set false once your
                          databases present a trusted certificate.
@@ -28,8 +32,9 @@ Environment variables:
 """
 import fnmatch
 import os
+import re
+import threading
 import time
-from functools import lru_cache
 
 import jwt
 import uvicorn
@@ -98,17 +103,53 @@ _DIALECTS = {
 }
 
 
-@lru_cache
+_engines: dict[str, tuple[str, object]] = {}
+_engines_lock = threading.Lock()
+
+
 def _engine(source: str):
+    """Return a pooled Engine for a source, rebuilt whenever its secret changes.
+
+    The engine cannot be cached on the source name alone: the password is baked into the
+    URL, so a permanently cached engine keeps using the password it was first built with
+    and a rotation never converges. Keying the cache on the current secret value means the
+    next call after a rotation rebuilds the engine and disposes the stale one.
+
+    The lock stops concurrent callers from each building an engine after a rotation and
+    silently overwriting -- and leaking -- one another's.
+    """
     if source not in SOURCES:
         raise ValueError(f"Unknown source '{source}'. Options: {', '.join(SOURCES)}")
     s = SOURCES[source]
-    drivername, query = _DIALECTS[s["type"]]
+    drivername, defaults = _DIALECTS[s["type"]]
     auth = s.get("auth", {})
+    current = _secret(auth["secret"]) if auth.get("secret") else ""
+    cached = _engines.get(source)
+    if cached and cached[0] == current:
+        return cached[1]
+    with _engines_lock:
+        cached = _engines.get(source)
+        if cached and cached[0] == current:
+            return cached[1]
+        engine = _build_engine(s, auth, drivername, defaults, current)
+        if cached:
+            cached[1].dispose()
+        _engines[source] = (current, engine)
+        return engine
+
+
+def _build_engine(s: dict, auth: dict, drivername: str, defaults: dict, current: str):
+    """Construct a fresh Engine for one source.
+
+    Per-source `connection.options` are merged over the dialect defaults, so a
+    PostgreSQL / MySQL / Oracle source can carry its own TLS parameters (e.g. sslmode)
+    instead of silently falling back to the driver's defaults.
+    """
+    query = {**defaults, **(s["connection"].get("options") or {})}
     url = URL.create(
         drivername,
         username=auth.get("username", SQL_USER),
-        password=_secret(auth["secret"]) if auth.get("secret") else None,
+        password=current or None,
         host=s["connection"]["host"],
         port=s["connection"].get("port"),
         database=s["connection"]["database"],
@@ -158,8 +199,32 @@ def get_schema(source: str) -> str:
     return "\n".join(lines) or "No tables."
 
 
-_BLOCKED = (" insert ", " update ", " delete ", " drop ", " alter ", " truncate ",
-            " exec ", " execute ", " merge ", " create ", " grant ", " revoke ", " into ")
+_BLOCKED_WORDS = ("insert", "update", "delete", "drop", "alter", "truncate",
+                  "exec", "execute", "merge", "create", "grant", "revoke", "into")
+
+# \b anchors on word boundaries, so punctuation cannot be used to split a keyword away
+# from a space-delimited match ("SELECT *INTO[t]FROM x" is valid T-SQL and would slip
+# past a " into " substring test).
+_BLOCKED = re.compile(r"\b(?:" + "|".join(_BLOCKED_WORDS) + r")\b", re.I)
+
+_COMMENTS = re.compile(r"--[^\n]*|/\*.*?\*/", re.S)
+
+
+def _normalize(sql: str, strip_comments: bool = True) -> str:
+    """Whitespace-collapsed text used ONLY for the safety check.
+
+    Collapsing whitespace stops a tab or a newline ("SELECT *\nINTO t FROM x") from
+    carrying a write past the filter. The original SQL is what actually executes; this
+    form is only inspected.
+
+    run_query checks both forms. Stripping comments catches a keyword split by "/*x*/";
+    keeping them catches the reverse trick of hiding a real keyword between comment
+    markers that are themselves inside string literals.
+    """
+    text = sql.lower()
+    if strip_comments:
+        text = _COMMENTS.sub(" ", text)
+    return re.sub(r"\s+", " ", text).strip()
 
 
 @mcp.tool()
@@ -167,10 +232,11 @@ def run_query(source: str, query: str) -> str:
     """Run ONE read-only SELECT against a named source and return up to the source's row cap.
     Use the SQL dialect of that source (shown by list_sources)."""
     q = query.strip().rstrip(";")
-    low = f" {q.lower()} "
-    if not (low.lstrip().startswith("select") or low.lstrip().startswith("with")):
+    low = _normalize(q)
+    forms = (low, _normalize(q, strip_comments=False))
+    if not (low.startswith("select") or low.startswith("with")):
         return "Error: only a single read-only SELECT (or WITH ... SELECT) is allowed."
-    if ";" in q or any(w in low for w in _BLOCKED):
+    if ";" in q or any(_BLOCKED.search(f) for f in forms):
         return "Error: only a single read-only SELECT statement is allowed."
     max_rows = int(_gov(source).get("max_rows", 200))
     try:

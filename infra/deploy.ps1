@@ -80,6 +80,9 @@ $acrName         = $out.acrName.value
 $acrLoginServer  = $out.acrLoginServer.value
 $mcpEndpoint     = $out.mcpEndpoint.value
 $foundryEndpoint = $out.foundryEndpoint.value
+$projectEndpoint = $out.foundryProjectEndpoint.value
+$foundryAccountId = $out.foundryAccountId.value
+$keyVaultName    = $out.keyVaultName.value
 $appName         = "$NamePrefix-mcp-server"
 
 Write-Host "    ACR:          $acrName"     -ForegroundColor Green
@@ -112,18 +115,31 @@ if (-not $SkipImageBuild) {
 
         Write-Host '==> Pointing the Container App at your image...' -ForegroundColor Cyan
         az containerapp update --name $appName --resource-group $ResourceGroup --image "$acrLoginServer/$ImageTag" | Out-Null
+        if ($LASTEXITCODE -ne 0) { throw "Failed to point $appName at $acrLoginServer/$ImageTag. The app is still running the placeholder image." }
     }
 }
 
 Write-Host ''
 Write-Host 'Infrastructure ready.' -ForegroundColor Green
-Write-Host "  MCP endpoint : $mcpEndpoint"
-Write-Host "  Foundry      : $foundryEndpoint"
+Write-Host "  MCP endpoint     : $mcpEndpoint"
+Write-Host "  Foundry account  : $foundryEndpoint"
+Write-Host "  Key Vault        : $keyVaultName"
+Write-Host "  {project}        : $projectEndpoint"
+Write-Host "  {armId}          : $foundryAccountId"
+Write-Host "  ARM deployment   : $deployName  (az deployment group show -g $ResourceGroup -n $deployName --query properties.outputs)"
 Write-Host ''
-Write-Host 'MANUAL STEPS (one-time, data plane):' -ForegroundColor Yellow
-Write-Host '  1. Create the read-only SQL login on each database (matching -SqlPassword).'
-Write-Host '  2. In the Azure AI Foundry portal: create a project + agent using the deployed model.'
-Write-Host "  3. Add an MCP tool -> URL: $mcpEndpoint   (Auth: Microsoft Entra / Project Managed Identity)."
-Write-Host '  4. Lock the endpoint to your agent (after it exists):'
+Write-Host ''
+Write-Host 'NEXT STEPS (one-time, data plane) - see README.md:' -ForegroundColor Yellow
+Write-Host '  4. Create the read-only DB login on each database (matching -SqlPassword).'
+Write-Host '  5. Create an Entra app registration to act as the token audience.'
+Write-Host "  6. Create the agent + an MCP tool pointing at: $mcpEndpoint"
+Write-Host '     (the Foundry project and model were created for you by the template).'
+Write-Host '     You need the Foundry User role on the project to create and run agents.'
+Write-Host '  7. Ask one question, then read the caller identity and lock the endpoint down:'
+Write-Host "       az containerapp logs show -n $appName -g $ResourceGroup --type console --tail 40 | Select-String AUTH"
 Write-Host "       az containerapp update -n $appName -g $ResourceGroup ``"
-Write-Host '         --set-env-vars ALLOWED_AUDIENCES=api://<your-app-reg> ALLOWED_CALLERS=<agent-azp>'
+Write-Host '         --set-env-vars ALLOWED_AUDIENCES=api://<appId>,<appId> ALLOWED_CALLERS=<azp-from-the-AUTH-discovery-log-line> DISCOVERY_MODE=false'
+if (-not $DiscoveryMode) {
+    Write-Host ''
+    Write-Warning "Deployed WITHOUT -DiscoveryMode, so /mcp fails closed (503) until ALLOWED_CALLERS is set. To learn the agent's azp first, redeploy with -DiscoveryMode or set DISCOVERY_MODE=true on the app."
+}

@@ -5,7 +5,7 @@
     "_generator": {
       "name": "bicep",
       "version": "0.36.177.2456",
-      "templateHash": "14443619429877161825"
+      "templateHash": "6037355194695077363"
     }
   },
   "parameters": {
@@ -139,7 +139,7 @@
     "acrName": "[format('{0}acr{1}', parameters('namePrefix'), uniqueString(resourceGroup().id))]",
     "envName": "[format('{0}-mcp-env', parameters('namePrefix'))]",
     "appName": "[format('{0}-mcp-server', parameters('namePrefix'))]",
-    "foundryName": "[format('{0}-foundry', parameters('namePrefix'))]",
+    "foundryName": "[format('{0}-foundry-{1}', parameters('namePrefix'), uniqueString(resourceGroup().id))]",
     "secretName": "sql-agentreader-password",
     "kvSecretsUserRoleId": "[subscriptionResourceId('Microsoft.Authorization/roleDefinitions', '4633458b-17de-408a-b874-0445c86b69e6')]",
     "acrPullRoleId": "[subscriptionResourceId('Microsoft.Authorization/roleDefinitions', '7f951dda-4ed3-4680-a7ca-43fe172d538d')]",
@@ -466,6 +466,10 @@
     "foundryProjectEndpoint": {
       "type": "string",
       "value": "[if(parameters('deployFoundry'), format('https://{0}.services.ai.azure.com/api/projects/{1}', toLower(variables('foundryName')), parameters('foundryProjectName')), '')]"
+    },
+    "foundryAccountId": {
+      "type": "string",
+      "value": "[if(parameters('deployFoundry'), resourceId('Microsoft.CognitiveServices/accounts', variables('foundryName')), '')]"
     },
     "foundryProjectPrincipalId": {
       "type": "string",

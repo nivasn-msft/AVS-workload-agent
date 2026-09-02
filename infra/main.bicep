@@ -103,7 +103,10 @@ var kvName = take('${namePrefix}-kv-${uniqueString(resourceGroup().id)}', 24)
 var acrName = '${namePrefix}acr${uniqueString(resourceGroup().id)}'
 var envName = '${namePrefix}-mcp-env'
 var appName = '${namePrefix}-mcp-server'
-var foundryName = '${namePrefix}-foundry'
+// The Foundry account's customSubDomainName becomes a GLOBAL DNS label
+// (<name>.services.ai.azure.com), so it needs the same uniqueness treatment as the
+// vault and the registry -- a bare '<prefix>-foundry' is claimable only once.
+var foundryName = '${namePrefix}-foundry-${uniqueString(resourceGroup().id)}'
 var secretName = 'sql-agentreader-password'
 
 // built-in role definition IDs
@@ -375,5 +378,9 @@ output appClientId string = uami.properties.clientId
 output foundryEndpoint string = deployFoundry ? foundry!.properties.endpoint : ''
 // Data-plane endpoint the Agent Service SDK / REST API talks to.
 output foundryProjectEndpoint string = deployFoundry ? 'https://${toLower(foundryName)}.services.ai.azure.com/api/projects/${foundryProjectName}' : ''
-// Put this in allowedCallers once the project exists (it is the azp your MCP server sees).
+// Control-plane ID of the Foundry account -- the {armId} used when creating a project connection.
+output foundryAccountId string = deployFoundry ? foundry!.id : ''
+// Object (principal) ID of the project's system-assigned identity -- use it for role
+// assignments. NOTE: this is NOT the `azp` your MCP server sees. `azp` is the calling
+// application's *client* ID; read the real value from the discovery log line.
 output foundryProjectPrincipalId string = deployFoundry ? foundryProject!.identity.principalId : ''
