@@ -158,10 +158,11 @@ az deployment group create -g <rg> --template-file infra/main.json `
    ```
 
    Gotchas that cost real debugging time:
-   - **A newly created connection is not immediately usable.** Reference it too soon and the
-     runtime silently sends *no* credential — the server logs `AUTH deny: no bearer token`
-     and the run fails with `424`, which looks exactly like a misconfigured connection. Give
-     it a short pause after the `PUT` before the first run.
+   - **A brand-new connection may not be usable on the very first run.** Reference it
+     immediately after creating it and the runtime can still send *no* credential — the
+     server logs `AUTH deny: no bearer token` and the run fails `424`, which looks exactly
+     like a misconfigured connection. If that happens, re-`PUT` the connection, pause
+     briefly, and run again; it then works and keeps working.
    - **`authorization` takes the bare token — Foundry adds `Bearer ` itself.** Passing
      `"Bearer eyJ…"` yields a doubled prefix and the server rejects it with
      `invalid token: Invalid header padding`. Note this is the **opposite** convention to the
@@ -253,7 +254,7 @@ Uncomment the driver in `app/requirements.txt` (`psycopg2-binary`, `pymysql`, `o
 - **Run fails with `MCP Connector error. Http status: 424 …` or `Server returned 424`:** Foundry reached the server but couldn't list tools — nearly always because the tool has **no working credential**, so it called anonymously and got the server's `401`. Confirm the direction from the server side: a `401` in the container logs means the request arrived; *no* log line at all means Foundry never called out.
 - **`AUTH deny: invalid token: Invalid header padding`:** you put `"Bearer …"` in the tool's `authorization` property. It takes the **bare token** — Foundry adds the `Bearer ` prefix itself.
 - **`AUTH deny: no bearer token` when the tool uses `project_connection_id`:** the connection was created moments earlier. The agent runtime resolves connections with a short lag; until it does, it calls anonymously and you get a `424`. Pause after the `PUT`, then re-run.
-- **`GET /agents/<name>` returns 404 right after deleting a *different* agent:** the collection is eventually consistent. Give it a moment before concluding the agent is gone.
+- **`GET {project}/agents` looks empty:** the response is an **OpenAI-style envelope** — the agents are in `data` (with `first_id` / `last_id` / `has_more`), *not* in ARM's usual `value`. Reading `.value` yields zero agents and makes it look like nothing was created.
 - **`Unknown parameter: 'tools[0].audience'` at run time,** even though the create call accepted `audience`: the management and runtime schemas disagree. Drop `audience`.
 - **Run fails with a bare `server_error` and nothing reaches the server:** you are passing a real Entra token in `tool_resources.mcp[].headers` on the older `/assistants` surface. Foundry blocks forwarding valid Entra tokens there — use `/agents` with `authorization`, or a project connection.
 - **`401 unauthorized` while the tool *is* configured:** the `aud` Foundry sends may be the **bare app ID**, not the `api://` URI. Put **both** forms in `ALLOWED_AUDIENCES` (`api://<appId>,<appId>`).
