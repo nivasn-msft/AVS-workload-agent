@@ -305,6 +305,18 @@ az ad app update --id $app.appId --identifier-uris "api://$($app.appId)"
 
 Keep that value for [Step 7](#step-7--lock-the-endpoint-to-your-agent).
 
+> **Access token versions, and why the next step lists the audience twice.** A new app registration issues **v1** access tokens by default. The two versions differ in exactly the places this server checks:
+>
+> | | v1 token | v2 token |
+> |---|---|---|
+> | `iss` | `https://sts.windows.net/<tenantId>/` | `https://login.microsoftonline.com/<tenantId>/v2.0` |
+> | `aud` for your API | `api://<appId>` | often the bare `<appId>` |
+> | Caller identity | `appid` | `azp` (and `appid` is **empty**) |
+>
+> The server accepts **both** — it trusts either issuer and reads `azp` first, falling back to `appid`. That is why [Step 7](#step-7--lock-the-endpoint-to-your-agent) puts both audience forms in `ALLOWED_AUDIENCES`: you don't have to know in advance which version the caller will present, and you don't need to change the app registration. If you'd rather pin it to v2, set `requestedAccessTokenVersion` to `2` in the app registration's **Manifest** blade in the portal.
+>
+> Whichever you choose, take the authoritative `aud` and `azp` from the discovery log line in [Step 7](#step-7--lock-the-endpoint-to-your-agent) rather than assuming — that line reports what the caller actually presented.
+
 > **Until `ALLOWED_AUDIENCES` is set, audience validation is switched off** — the server still verifies the token's signature and issuer, so it only accepts tokens from your tenant, but it won't care what they were issued *for*. Setting it in Step 7 is what closes that gap, so don't skip it.
 >
 > If your tenant restricts app registrations, or restricts which audiences you may request tokens for, you can skip this step: discovery mode logs the audience actually presented, and you can allow exactly that one instead.
@@ -455,7 +467,7 @@ az containerapp update -n <namePrefix>-mcp-server -g <rg> `
                  DISCOVERY_MODE=false
 ```
 
-- Put **both** forms of the audience in `ALLOWED_AUDIENCES` — Foundry may send the bare app ID rather than the `api://` URI. If you skipped Step 5, use the `aud` value from the log line.
+- Put **both** forms of the audience in `ALLOWED_AUDIENCES` — Foundry may send the bare app ID rather than the `api://` URI, because that is what a **v2** token carries ([see the token-version note in Step 5](#step-5--create-a-token-audience-recommended)). If you skipped Step 5, use the `aud` value from the log line.
 - Setting `ALLOWED_CALLERS` is what enforces the allow-list, but set `DISCOVERY_MODE=false` too, so the endpoint can never silently reopen if the allow-list is later cleared.
 
 From now on, the server accepts calls **only** from that caller. Every request is checked for signature, issuer, audience, and caller.
