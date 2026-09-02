@@ -121,6 +121,23 @@ az deployment group create -g <rg> --template-file infra/main.json `
      "input": "Which products are selling well but are at or below their reorder point?" }
    ```
 
+   Give the agent instructions that suit a multi-source server. This one matters more than it
+   looks: each source is a **separate** database server, so the model will happily emit
+   `inventory.dbo.Products` from the `sales` source, get an error, and then conclude the
+   question is unanswerable instead of correlating client-side.
+   ```text
+   You answer questions using ONLY the avs_data MCP tool, which reaches SQL Server databases
+   running on virtual machines inside an Azure VMware Solution private cloud.
+   Call list_sources first, then get_schema for each relevant source, then run_query with a
+   single read-only SELECT. run_query takes "source" and "query".
+
+   IMPORTANT: each source is a SEPARATE database server. You cannot join across sources in
+   SQL, and a query naming another source will fail. To combine data, query each source
+   independently and correlate the results yourself, matching on the shared business key.
+
+   Never invent data. State which database each number came from.
+   ```
+
    Gotchas that cost real debugging time:
    - **`authorization` takes the bare token — Foundry adds `Bearer ` itself.** Passing
      `"Bearer eyJ…"` yields a doubled prefix and the server rejects it with
