@@ -83,30 +83,65 @@ az deployment group create -g <rg> --template-file infra/main.json `
    "audience = api://$($app.appId)"
    ```
 
-3. **In the Azure AI Foundry portal:** the template already created the account, the **project** (`foundryProjectName`) and the model deployment, so open the project and create an **agent** on that model, then **attach an MCP tool**:
-   - **Server URL:** the `mcpEndpoint` output (e.g. `https://<app>.<region>.azurecontainerapps.io/mcp`)
-   - **Authentication:** Microsoft Entra / **Project Managed Identity**
-   - **Audience:** `api://<appId>` from step 2
+3. **Create the agent.** The template already created the account, the **project**
+   (`foundryProjectName`) and the model deployment, so all that's left is the agent and its
+   MCP tool. You can do this in the portal or from code — but **mind which agent API you use**:
 
-   > **This step is portal-only.** The MCP tool's authentication cannot be set from code
-   > on the current Agent Service API: `authorization`, `auth`, `audience`,
-   > `connection_id` and `require_approval` are all rejected as `unknown_parameter` when
-   > creating the tool (observed on `api-version=v1` and `2025-05-15-preview`), and a
-   > created tool echoes back only `{type, server_label, server_url, allowed_tools}`.
-   > This API surface is moving quickly — re-check on newer API versions.
-   >
-   > **Don't try to work around it by passing a bearer token yourself** via
-   > `tool_resources.mcp[].headers` on the run. Foundry will not forward a
-   > *cryptographically valid* Entra token that way: the run fails with a generic
-   > `server_error` and **no request ever leaves Foundry**. The same token with its
-   > signature corrupted, and a random string of the same length, both get through and
-   > reach the server — so this is a credential-forwarding guardrail in the service, not
-   > a size or schema limit. `headers` remains usable for servers that authenticate with
-   > a static, non-Entra API key.
-   >
-   > Until the tool's Entra auth is configured the agent sends **no** token, the server
-   > correctly answers `401`, and the run fails with
-   > `MCP Connector error. Http status: 424 ... Error retrieving tool list`.
+   > **There are two different agent collections, and the portal only shows one of them.**
+   > `POST {project}/assistants` (threads/runs) and `POST {project}/agents` (versioned agents,
+   > **Responses** protocol) are *separate stores*. An agent created under `/assistants` does
+   > **not** appear in the portal's Agents list, which makes it look like nothing was created.
+   > Use **`/agents`**.
+
+   Creating it from code (`api-version=v1`):
+   ```jsonc
+   POST {project}/agents?api-version=v1
+   {
+     "name": "avs-data-agent",
+     "definition": {
+       "kind": "prompt",                       // one of: prompt|hosted|workflow|external|voice
+       "model": "gpt-5.4-mini",
+       "instructions": "...",
+       "tools": [{
+         "type": "mcp",
+         "server_label": "avs_data",
+         "server_url": "<mcpEndpoint output>",
+         "allowed_tools": ["list_sources", "get_schema", "run_query"],
+         "require_approval": "never",
+         "authorization": "<access token WITHOUT the 'Bearer ' prefix>"
+       }]
+     }
+   }
+   ```
+
+   Then invoke it — note the unusual path, and that **`api-version` must be omitted**:
+   ```jsonc
+   POST {project}/openai/v1/responses
+   { "agent_reference": { "type": "agent_reference", "name": "avs-data-agent" },
+     "input": "Which products are selling well but are at or below their reorder point?" }
+   ```
+
+   Gotchas that cost real debugging time:
+   - **`authorization` takes the bare token — Foundry adds `Bearer ` itself.** Passing
+     `"Bearer eyJ…"` yields a doubled prefix and the server rejects it with
+     `invalid token: Invalid header padding`.
+   - **`headers` is refused outright** at create time: *"Headers that can include sensitive
+     information are not allowed in the headers property for MCP tools. Use
+     project_connection_id instead."* Store durable credentials in a **project connection**
+     and reference it with `project_connection_id`.
+   - **`audience` is accepted and stored by the create call but rejected at run time** with
+     `Unknown parameter: 'tools[0].audience'`. Don't rely on it.
+   - On the older `/assistants` surface, run-level `tool_resources.mcp[].headers` will **not**
+     forward a *cryptographically valid* Entra token: the run dies with a generic
+     `server_error` before any outbound call, while the same token with a corrupted signature
+     — or a random string of identical length — goes through. Another reason to use `/agents`.
+   - With no auth configured the agent calls **anonymously**, the server correctly answers
+     `401`, and the run fails with `Server returned 424` /
+     `MCP Connector error … Error retrieving tool list`. A `424` therefore means *"your tool
+     has no working credential"*, not *"the server is down"*.
+
+   A raw token in `authorization` expires (typically ~1 hour) — fine for a demo, but for
+   anything lasting use a project connection or the portal's Entra / managed-identity option.
 
 4. **Lock the endpoint to your agent** (the server ships in *discovery mode* to make this painless):
    - Ask one test question in the playground. The server **logs the caller's identity**:
@@ -173,8 +208,11 @@ Uncomment the driver in `app/requirements.txt` (`psycopg2-binary`, `pymysql`, `o
 ## Troubleshooting
 - **`503` / "server is not locked down":** `ALLOWED_CALLERS` is empty and discovery mode is off. This is deliberate — set `allowedCallers`, or deploy once with `discoveryMode=true` to learn the `azp`.
 - **`401 unauthorized` after locking:** the token's `azp` doesn't match `ALLOWED_CALLERS`. Re-check the discovery log line, or redeploy with `discoveryMode=true` to re-enter discovery.
-- **Run fails with `MCP Connector error. Http status: 424 ... Error retrieving tool list from MCP server`:** Foundry reached the server but couldn't list tools. Almost always the tool has **no authentication configured**, so it called anonymously and got the server's `401`. Configure Entra / Project Managed Identity on the tool (step 3). Confirm the direction of the failure from the server side — a `401` in the container logs means the request arrived; *no* log line at all means Foundry never called out.
-- **Run fails with a bare `server_error` and nothing reaches the server:** you are passing a real Entra token in `tool_resources.mcp[].headers`. Foundry blocks forwarding valid Entra tokens (see step 3) — configure auth on the tool instead.
+- **The agent you created isn't in the portal:** you almost certainly created it under `/assistants`. The portal lists the `/agents` collection — they are separate stores. Re-create it with `POST {project}/agents` (see step 3).
+- **Run fails with `MCP Connector error. Http status: 424 …` or `Server returned 424`:** Foundry reached the server but couldn't list tools — nearly always because the tool has **no working credential**, so it called anonymously and got the server's `401`. Confirm the direction from the server side: a `401` in the container logs means the request arrived; *no* log line at all means Foundry never called out.
+- **`AUTH deny: invalid token: Invalid header padding`:** you put `"Bearer …"` in the tool's `authorization` property. It takes the **bare token** — Foundry adds the `Bearer ` prefix itself.
+- **`Unknown parameter: 'tools[0].audience'` at run time,** even though the create call accepted `audience`: the management and runtime schemas disagree. Drop `audience`.
+- **Run fails with a bare `server_error` and nothing reaches the server:** you are passing a real Entra token in `tool_resources.mcp[].headers` on the older `/assistants` surface. Foundry blocks forwarding valid Entra tokens there — use `/agents` with `authorization`, or a project connection.
 - **`401 unauthorized` while the tool *is* configured:** the `aud` Foundry sends may be the **bare app ID**, not the `api://` URI. Put **both** forms in `ALLOWED_AUDIENCES` (`api://<appId>,<appId>`).
 - **Env-var changes appear to do nothing:** the app reads its configuration once at process start, so `ALLOWED_CALLERS` / `ALLOWED_AUDIENCES` / `DISCOVERY_MODE` only take effect on a **new revision**. Redeploy, or restart the revision.
 - **Container App stuck `InProgress` with no revisions:** almost always the image pull. The template uses a **user-assigned** identity precisely so `AcrPull` exists *before* the app is created; a system-assigned identity deadlocks (the role assignment needs the app's principal, the app needs the role to start).
