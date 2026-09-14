@@ -10,6 +10,8 @@ rectangle for an AVS private cloud, purple for ExpressRoute, and green for the d
 | `architecture.svg` | [README](../../../README.md) — *How it works* |
 | `gen1-gen2.svg` | [README](../../../README.md) — *AVS Gen 1 and Gen 2* |
 | `request-flow.svg` | [README](../../../README.md) — *Security model*, and [blog.md](../../blog.md) |
+| `workload-pattern.svg` | [blog.md](../../blog.md) — *Solution overview* |
+| `topology.svg` | [blog.md](../../blog.md) — *Network topology* |
 
 Each diagram has a `-dark` twin. Both are referenced from a `<picture>` element so GitHub serves
 the right one for the reader's theme.
@@ -18,7 +20,7 @@ the right one for the reader's theme.
 
 ```bash
 cd docs/media/diagrams
-python generate_diagrams.py     # rewrites all six SVGs
+python generate_diagrams.py     # rewrites all ten SVGs
 ```
 
 `_svgkit.py` holds the palette and the shape/glyph primitives — edit the `LIGHT` and `DARK`

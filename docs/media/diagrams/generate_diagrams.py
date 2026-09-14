@@ -20,9 +20,10 @@ import sys
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 
-from _svgkit import (DARK, LIGHT, badge, g_agent, g_azure, g_cloud,
-                     g_container, g_db, g_host, g_key, g_shield, g_user,
-                     g_vnet, line, note, path, rect, svg_open, text)
+from _svgkit import (DARK, LIGHT, badge, g_agent, g_api, g_azure, g_cloud,
+                     g_container, g_db, g_folder, g_gateway, g_host, g_key,
+                     g_pe, g_shield, g_user, g_vnet, line, note, path, rect,
+                     svg_open, text)
 
 
 def legend_item(x, y, n, head, lines, th, colour=None, w=200):
@@ -324,6 +325,244 @@ def request_flow(th):
 
 
 # ===========================================================================
+#  4. Workload pattern - one agent, many bridges
+# ===========================================================================
+
+def workload_pattern(th):
+    W, H = 1120, 604
+    o = [svg_open(W, H, th)]
+    a = o.append
+
+    G, P = th["green"], th["purple"]
+
+    # ---- the people asking ----
+    a(g_user(36, 250, th, 1.7))
+    a(text(53, 320, "Business users", 13, th["text"], "600", anchor="middle"))
+    a(note(53, 340, ["Teams, Copilot,", "your own app"], th, size=11, lh=15,
+           anchor="middle"))
+
+    # ---- outer Microsoft Azure boundary (AVS is an Azure service: inside) ----
+    a(rect(124, 34, 968, 470, th["azure"], rx=6, sw=1.6))
+    a(g_azure(142, 44, th, 0.8))
+    a(text(166, 60, "Microsoft Azure", 14, th["text"], "600"))
+
+    # ---- the one agent ----
+    a(rect(146, 214, 152, 150, th["card_line"], th["card"], rx=8, sw=1.4))
+    a(g_agent(162, 230, th, 0.95))
+    a(text(162, 282, "Azure AI Foundry", 13, th["text"], "600"))
+    a(text(162, 300, "One managed agent", 12, th["muted"]))
+    a(note(162, 322, ["It speaks MCP.", "It does not know", "SQL from a file share."],
+           th, size=10.5, lh=14))
+
+    # ---- the VNet holding the bridges ----
+    a(rect(336, 92, 262, 384, th["vnet"], rx=8, sw=1.6, dash="7 5"))
+    a(g_vnet(352, 102, th, 0.75))
+    a(text(378, 116, "Your virtual network", 12.5, th["azure"], "600"))
+    a(text(352, 138, "MCP servers on Container Apps", 11, th["muted"]))
+
+    bridges = ((150, g_container, "SQL Server", "list · schema · query", True),
+               (248, g_folder, "File shares", "search · read", False),
+               (346, g_api, "Line-of-business APIs", "call · summarise", False))
+    for by, glyph, name, tools, live in bridges:
+        a(rect(352, by, 230, 80, th["card_line"], th["card"], rx=7, sw=1.3))
+        a(glyph(368, by + 16, th, 0.85))
+        a(text(396, by + 31, name, 12.5, th["text"], "600"))
+        a(text(368, by + 54, tools, 11, th["muted"]))
+        if live:
+            a(rect(478, by + 10, 94, 19, th["green"], th["green_soft"], rx=9.5,
+                   sw=1.1))
+            a(text(525, by + 23, "built in this kit", 10, th["green"], "700",
+                   anchor="middle"))
+        else:
+            a(text(368, by + 70, "same shape, new data source", 10,
+                   th["muted"], opacity="0.85"))
+        # agent -> bridge
+        a(line(298, 289, 346, by + 40, G, 1.9, dash="1 6", marker="ah-green"))
+
+    a(text(222, 392, "MCP over HTTPS", 11.5, G, "700", anchor="middle"))
+    a(text(222, 408, "+ Entra token", 10.5, th["muted"], anchor="middle"))
+
+    # ---- the AVS private cloud ----
+    a(rect(632, 92, 436, 384, th["avs"], rx=8, sw=1.8))
+    a(g_cloud(650, 104, th, 0.8))
+    a(text(678, 120, "Azure VMware Solution", 13.5, th["text"], "600"))
+    a(text(678, 137, "Your private cloud - the VMs you already run", 11,
+           th["muted"]))
+
+    loads = ((166, g_db, "SQL Server VMs",
+              "Sales, inventory, finance - the systems of record"),
+             (264, g_folder, "File servers",
+              "Contracts, drawings, scanned documents"),
+             (362, g_api, "Line-of-business apps",
+              "ERP, MES, claims - whatever runs the business"))
+    for ly, glyph, name, sub in loads:
+        a(rect(654, ly, 396, 76, th["card_line"], th["card_alt"], rx=7, sw=1.2))
+        a(glyph(672, ly + 16, th, 0.85))
+        a(text(700, ly + 31, name, 12.5, th["text"], "600"))
+        a(text(672, ly + 56, sub, 11, th["muted"]))
+        # bridge -> workload, over the private path
+        a(line(592, ly + 24, 648, ly + 38, P, 1.9, marker="ah-purple"))
+
+    a(text(615, 84, "ExpressRoute - private, never the internet", 11, P, "700",
+           anchor="middle"))
+
+    # ---- the takeaway ----
+    a(rect(20, 522, 1080, 62, th["purple"], th["purple_soft"], rx=8, sw=1.3))
+    a(g_shield(40, 538, th, 0.9))
+    a(text(76, 548, "One agent, one contract, many workloads.", 13,
+           th["text"], "700"))
+    a(text(76, 568, "Each bridge is a small server that exposes one data "
+                    "source as MCP tools. Adding a workload means adding a "
+                    "bridge - not rebuilding the agent, and not moving the "
+                    "data out of AVS.", 11.5, th["muted"]))
+
+    a("</svg>")
+    return "\n".join(o)
+
+
+# ===========================================================================
+#  5. Network topology - the private path, address by address
+# ===========================================================================
+
+def topology(th):
+    W, H = 1120, 640
+    o = [svg_open(W, H, th)]
+    a = o.append
+
+    P = th["purple"]
+
+    # ---- outer Microsoft Azure boundary ----
+    a(rect(24, 34, 1072, 486, th["azure"], rx=6, sw=1.6))
+    a(g_azure(42, 44, th, 0.8))
+    a(text(66, 60, "Microsoft Azure", 14, th["text"], "600"))
+
+    # ---- Foundry: a managed service, outside your VNet ----
+    a(rect(46, 82, 240, 92, th["card_line"], th["card"], rx=8, sw=1.4))
+    a(g_agent(64, 96, th, 0.9))
+    a(text(92, 112, "Azure AI Foundry", 13, th["text"], "600"))
+    a(text(64, 136, "Managed by Microsoft, outside", 11, th["muted"]))
+    a(text(64, 152, "your VNet - so it reaches in.", 11, th["muted"]))
+
+    # ---- the hub VNet ----
+    a(rect(46, 194, 550, 306, th["vnet"], rx=8, sw=1.6, dash="7 5"))
+    a(g_vnet(62, 204, th, 0.75))
+    a(text(88, 218, "avs-hub-vnet", 13, th["azure"], "600"))
+    a(text(176, 218, "10.40.0.0/16", 12, th["muted"]))
+
+    # delegated subnet
+    a(rect(64, 238, 280, 150, th["vnet"], rx=6, sw=1.2, dash="4 4"))
+    a(text(78, 258, "aca-subnet   10.40.8.0/23", 11.5, th["azure"], "600"))
+    a(text(78, 274, "delegated to Microsoft.App", 10.5, th["muted"]))
+    a(rect(78, 286, 252, 86, th["card_line"], th["card"], rx=7, sw=1.3))
+    a(g_container(94, 300, th, 0.85))
+    a(text(122, 315, "MCP server on Container Apps", 12, th["text"], "600"))
+    a(text(94, 338, "Internal ingress only - a private IP,", 10.5, th["muted"]))
+    a(text(94, 353, "no public endpoint, managed identity.", 10.5, th["muted"]))
+
+    # private endpoint
+    a(rect(360, 238, 218, 74, th["card_line"], th["card_alt"], rx=7, sw=1.2))
+    a(g_pe(376, 252, th, 0.85))
+    a(text(404, 267, "Private endpoint", 12, th["text"], "600"))
+    a(text(376, 290, "How Foundry reaches the server", 10.5, th["muted"]))
+    a(path("M166 174 Q 166 206 230 206 L 449 206 Q 469 206 469 230",
+           th["azure"], 1.8, dash="5 5", marker="ah-azure"))
+
+    # key vault
+    a(rect(360, 326, 218, 62, th["card_line"], th["card_alt"], rx=7, sw=1.2))
+    a(g_key(376, 338, th, 0.8))
+    a(text(404, 353, "Key Vault", 12, th["text"], "600"))
+    a(text(376, 374, "Private endpoint, RBAC only", 10.5, th["muted"]))
+
+    # ExpressRoute gateway
+    a(rect(64, 404, 514, 80, th["purple"], th["purple_soft"], rx=7, sw=1.3))
+    a(g_gateway(82, 420, th, 0.9))
+    a(text(110, 435, "ExpressRoute gateway", 12.5, th["text"], "600"))
+    a(text(82, 458, "GatewaySubnet 10.40.1.0/24  -  connected to the AVS "
+                    "private cloud", 11, th["muted"]))
+    a(text(82, 474, "with an authorisation key. Traffic never touches the "
+                    "public internet.", 10.5, P, "700"))
+
+    # ---- AVS private cloud ----
+    a(rect(700, 82, 376, 418, th["avs"], rx=8, sw=1.8))
+    a(g_cloud(718, 94, th, 0.8))
+    a(text(746, 110, "Azure VMware Solution", 13.5, th["text"], "600"))
+    a(text(746, 127, "private cloud", 11, th["muted"]))
+
+    a(rect(720, 146, 336, 96, th["card_line"], th["card_alt"], rx=7, sw=1.2))
+    a(text(738, 168, "Management network   10.10.0.0/22", 11.5, th["text"],
+           "600"))
+    for i, it in enumerate(("vCenter", "NSX-T mgr", "HCX")):
+        a(g_host(738 + i * 106, 182, th, 0.6))
+        a(text(760 + i * 106, 195, it, 10.5, th["muted"]))
+    a(text(738, 228, "Untouched by this kit - the agent never talks to it.",
+           10.5, th["muted"]))
+
+    a(rect(720, 258, 336, 222, th["vnet"], rx=7, sw=1.3, dash="4 4"))
+    a(text(738, 280, "NSX-T segment   10.20.10.0/24", 11.5, th["azure"], "600"))
+    a(text(738, 296, "A routed workload segment, reached over ExpressRoute",
+           10.5, th["muted"]))
+
+    for i, (nm, ip) in enumerate((("SalesDB", "10.20.10.21"),
+                                  ("InventoryDB", "10.20.10.22"))):
+        vy = 314 + i * 80
+        a(rect(738, vy, 300, 68, th["card_line"], th["card"], rx=6, sw=1.2))
+        a(g_db(754, vy + 14, th, 0.85))
+        a(text(782, vy + 29, nm, 12.5, th["text"], "600"))
+        a(text(754, vy + 52, "%s  ·  port 1433  ·  read-only login"
+               % ip, 10.5, th["muted"]))
+
+    # ---- the private path ----
+    a(path("M578 444 L 620 444 Q 648 444 648 416 L 648 398 Q 648 370 676 370 "
+           "L 694 370", P, 2.4, marker="ah-purple"))
+    a(text(648, 330, "ExpressRoute", 11.5, P, "700", anchor="middle"))
+    a(text(648, 346, "private peering", 10.5, th["muted"], anchor="middle"))
+
+    # ---- what this buys you ----
+    a(rect(20, 542, 1080, 78, th["card_line"], th["card_alt"], rx=8, sw=1.2))
+    a(g_shield(40, 556, th, 0.9))
+    items = (("No public endpoint",
+              "The MCP server has a private IP only."),
+             ("No credential in the agent",
+              "The password lives in Key Vault."),
+             ("No data egress",
+              "Your databases stay on your VMs in AVS."))
+    for i, (head, sub) in enumerate(items):
+        x = 80 + i * 344
+        a(text(x, 566, head, 12, th["text"], "700"))
+        a(text(x, 585, sub, 11, th["muted"]))
+        if i < 2:
+            a(line(x + 318, 552, x + 318, 606, th["card_line"], 1))
+    a(text(80, 606, "Addresses shown are from the lab this kit was validated "
+                    "in - substitute your own.", 10.5, th["muted"],
+           opacity="0.9"))
+
+    a("</svg>")
+    return "\n".join(o)
+
+    # ---- what this buys you ----
+    a(rect(20, 542, 1080, 78, th["card_line"], th["card_alt"], rx=8, sw=1.2))
+    a(g_shield(40, 556, th, 0.9))
+    items = (("No public endpoint",
+              "The MCP server has a private IP only."),
+             ("No credential in the agent",
+              "The password lives in Key Vault."),
+             ("No data egress",
+              "Your databases stay on your VMs in AVS."))
+    for i, (head, sub) in enumerate(items):
+        x = 80 + i * 344
+        a(text(x, 566, head, 12, th["text"], "700"))
+        a(text(x, 585, sub, 11, th["muted"]))
+        if i < 2:
+            a(line(x + 318, 552, x + 318, 606, th["card_line"], 1))
+    a(text(80, 606, "Addresses shown are from the lab this kit was validated "
+                    "in - substitute your own.", 10.5, th["muted"],
+           opacity="0.9"))
+
+    a("</svg>")
+    return "\n".join(o)
+
+
+# ===========================================================================
 
 def main():
     out = sys.argv[1] if len(sys.argv) > 1 else os.path.dirname(
@@ -333,7 +572,9 @@ def main():
 
     for name, fn in (("architecture", architecture),
                      ("gen1-gen2", gen1_gen2),
-                     ("request-flow", request_flow)):
+                     ("request-flow", request_flow),
+                     ("workload-pattern", workload_pattern),
+                     ("topology", topology)):
         for th, suffix in ((LIGHT, ""), (DARK, "-dark")):
             p = os.path.join(out, "%s%s.svg" % (name, suffix))
             with open(p, "w", encoding="utf-8", newline="\n") as f:

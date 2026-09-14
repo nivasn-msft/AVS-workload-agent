@@ -14,34 +14,10 @@ This post shows a **repeatable pattern that closes that gap for any workload**: 
 
 One managed agent in Azure AI Foundry talks to your private AVS workloads through a set of small **MCP servers** — one per workload type. SQL databases are live today; a file-share bridge or an API bridge is *the same pattern with different tools*.
 
-```mermaid
-flowchart LR
-    U["Business users<br/>Teams · Copilot · Foundry"] --> AG["Azure AI Foundry<br/>managed agent"]
-    subgraph az["Azure — VNet-integrated Container Apps"]
-        M1["SQL<br/>MCP server"]
-        M2["File-share<br/>MCP server"]
-        M3["API / LOB<br/>MCP server"]
-    end
-    subgraph avs["Azure VMware Solution — private cloud"]
-        W1[("Databases")]
-        W2["File shares<br/>SMB · NFS"]
-        W3["Line-of-business<br/>apps · REST/SOAP"]
-    end
-    AG -->|"MCP + Entra token"| M1
-    AG -->|"MCP + Entra token"| M2
-    AG -->|"MCP + Entra token"| M3
-    M1 -->|"ExpressRoute"| W1
-    M2 -->|"ExpressRoute"| W2
-    M3 -->|"ExpressRoute"| W3
-
-    classDef azure fill:#E8F1FB,stroke:#0078D4,stroke-width:1.5px,color:#1F2328;
-    classDef avs fill:#FFFFFF,stroke:#1F2328,stroke-width:1.5px,color:#1F2328;
-    classDef user fill:#F1EBFA,stroke:#8661C5,stroke-width:1.5px,color:#1F2328;
-    class M1,M2,M3,AG azure;
-    class W1,W2,W3 avs;
-    class U user;
-    linkStyle default stroke:#8661C5,stroke-width:1.6px;
-```
+<picture>
+  <source media="(prefers-color-scheme: dark)" srcset="./media/diagrams/workload-pattern-dark.svg">
+  <img alt="One agent, many bridges: business users ask a single Azure AI Foundry managed agent, which calls MCP servers over HTTPS with an Entra token. Each MCP server runs on Container Apps in your virtual network and bridges one workload type - SQL Server (built in this kit), file shares, or line-of-business APIs - to the matching workloads running on VMs in the Azure VMware Solution private cloud, reached over ExpressRoute." src="./media/diagrams/workload-pattern.svg">
+</picture>
 
 Three ideas carry the design:
 
@@ -103,40 +79,10 @@ The reference deployment runs in a single Azure region (Canada East), with the A
 
 The bridge works because the Container Apps subnet routes to the AVS private cloud over ExpressRoute, while Foundry is reachable privately via a private endpoint.
 
-```mermaid
-flowchart TB
-    subgraph vnet["VNet: avs-hub-vnet (10.40.0.0/16)"]
-        JB["Jumpbox 10.40.1.4"]
-        subgraph aca["aca-subnet 10.40.8.0/23 (delegated Microsoft.App)"]
-            MCP["avs-mcp-server<br/>(MCP Data Server)"]
-        end
-        PE["Foundry Private Endpoint<br/>avs-sql-foundry-pe → 10.40.1.7"]
-        GW["ExpressRoute Gateway<br/>avs-ergw"]
-    end
-    subgraph avs["AVS private cloud: avs-private-cloud"]
-        MGMT["Management net 10.101.0.0/22<br/>vCenter 10.101.0.2 · NSX 10.101.0.3"]
-        subgraph seg["Workload segment 192.168.131.0/24"]
-            DB1[("SalesDB .55")]
-            DB2[("InventoryDB .56")]
-        end
-    end
-    FDRY["avs-sql-foundry (managed agent)"]
-    MCP -->|ExpressRoute| GW --> avs
-    MCP --> DB1
-    MCP --> DB2
-    FDRY -. private endpoint .-> PE
-    FDRY -->|HTTPS + Entra token| MCP
-
-    classDef azure fill:#E8F1FB,stroke:#0078D4,stroke-width:1.5px,color:#1F2328;
-    classDef avs fill:#FFFFFF,stroke:#1F2328,stroke-width:1.5px,color:#1F2328;
-    classDef data fill:#E8F6EE,stroke:#107C41,stroke-width:1.5px,color:#1F2328;
-    class MCP,PE,GW,JB,FDRY azure;
-    class MGMT avs;
-    class DB1,DB2 data;
-    linkStyle default stroke:#8661C5,stroke-width:1.6px;
-```
-
-> Addresses above are from the lab this kit was validated in; substitute your own.
+<picture>
+  <source media="(prefers-color-scheme: dark)" srcset="./media/diagrams/topology-dark.svg">
+  <img alt="Network topology: inside Microsoft Azure, Azure AI Foundry sits outside the hub virtual network and reaches in over a private endpoint. The avs-hub-vnet (10.40.0.0/16) holds the MCP server on Container Apps in a delegated aca-subnet (10.40.8.0/23) with internal ingress only, a Key Vault private endpoint, and an ExpressRoute gateway in GatewaySubnet 10.40.1.0/24. ExpressRoute private peering reaches the Azure VMware Solution private cloud, where SalesDB (10.20.10.21) and InventoryDB (10.20.10.22) sit on an NSX-T segment (10.20.10.0/24), separate from the untouched management network." src="./media/diagrams/topology.svg">
+</picture>
 
 Key points:
 - The **MCP server** runs in a delegated **`aca-subnet`** and reaches the workload segment over ExpressRoute.

@@ -236,6 +236,55 @@ def g_host(x, y, th, s=1.0):
             '</g>' % (x, y, s, c, c, th["green"], th["green"]))
 
 
+def g_folder(x, y, th, s=1.0):
+    """File share: a folder."""
+    c, c2 = th["azure"], th["cyan"]
+    return ('<g transform="translate(%g,%g) scale(%g)">'
+            '<path d="M1.5 4.6 a1.8 1.8 0 0 1 1.8 -1.8 L8 2.8 L10.2 5.4 '
+            'L17.2 5.4 a1.8 1.8 0 0 1 1.8 1.8 L19 8 L1.5 8 Z" fill="%s"/>'
+            '<path d="M1.5 7.6 L18.9 7.6 L17.6 17.2 a1.8 1.8 0 0 1 -1.8 1.5 '
+            'L4.6 18.7 a1.8 1.8 0 0 1 -1.8 -1.5 Z" fill="%s"/>'
+            '</g>' % (x, y, s, c, c2))
+
+
+def g_api(x, y, th, s=1.0):
+    """Line-of-business API: angle brackets around a slash."""
+    c, c2 = th["azure"], th["cyan"]
+    return ('<g transform="translate(%g,%g) scale(%g)" fill="none" '
+            'stroke-width="2.1" stroke-linecap="round" stroke-linejoin="round">'
+            '<path d="M6.6 5 L1.6 10.4 L6.6 15.8" stroke="%s"/>'
+            '<path d="M14.6 5 L19.6 10.4 L14.6 15.8" stroke="%s"/>'
+            '<path d="M11.8 3.6 L9.4 17.2" stroke="%s"/>'
+            '</g>' % (x, y, s, c, c, c2))
+
+
+def g_gateway(x, y, th, s=1.0):
+    """ExpressRoute gateway: two arrows crossing a boundary."""
+    c = th["purple"]
+    return ('<g transform="translate(%g,%g) scale(%g)">'
+            '<rect x="1.4" y="5.2" width="17.2" height="10.4" rx="2.4" '
+            'fill="none" stroke="%s" stroke-width="1.8"/>'
+            '<path d="M4.6 9 L12 9 M9.6 6.6 L12 9 L9.6 11.4" stroke="%s" '
+            'stroke-width="1.7" fill="none" stroke-linecap="round" '
+            'stroke-linejoin="round"/>'
+            '<path d="M15.4 12.4 L8 12.4 M10.4 10 L8 12.4 L10.4 14.8" '
+            'stroke="%s" stroke-width="1.7" fill="none" stroke-linecap="round" '
+            'stroke-linejoin="round"/>'
+            '</g>' % (x, y, s, c, c, th["cyan"]))
+
+
+def g_pe(x, y, th, s=1.0):
+    """Private endpoint: a plug into a ring."""
+    c = th["azure"]
+    return ('<g transform="translate(%g,%g) scale(%g)">'
+            '<circle cx="13.4" cy="10" r="5.6" fill="none" stroke="%s" '
+            'stroke-width="1.9"/>'
+            '<circle cx="13.4" cy="10" r="2" fill="%s"/>'
+            '<path d="M0.8 10 L7.6 10" stroke="%s" stroke-width="1.9" '
+            'stroke-linecap="round"/>'
+            '</g>' % (x, y, s, c, th["cyan"], c))
+
+
 def badge(x, y, n, th, color=None):
     """Numbered step badge."""
     c = color or th["azure"]
