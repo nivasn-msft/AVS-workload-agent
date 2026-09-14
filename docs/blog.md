@@ -15,11 +15,6 @@ This post shows a **repeatable pattern that closes that gap for any workload**: 
 One managed agent in Azure AI Foundry talks to your private AVS workloads through a set of small **MCP servers** — one per workload type. SQL databases are live today; a file-share bridge or an API bridge is *the same pattern with different tools*.
 
 ```mermaid
-%%{init: {'theme':'base','themeVariables':{
-  'fontFamily':'Segoe UI, -apple-system, sans-serif',
-  'primaryColor':'#E8F1FB','primaryTextColor':'#1F2328','primaryBorderColor':'#0078D4',
-  'lineColor':'#8661C5','secondaryColor':'#F1EBFA','tertiaryColor':'#E8F6EE',
-  'clusterBkg':'#F6F9FC','clusterBorder':'#0078D4'}}}%%
 flowchart LR
     U["Business users<br/>Teams · Copilot · Foundry"] --> AG["Azure AI Foundry<br/>managed agent"]
     subgraph az["Azure — VNet-integrated Container Apps"]
@@ -45,6 +40,7 @@ flowchart LR
     class M1,M2,M3,AG azure;
     class W1,W2,W3 avs;
     class U user;
+    linkStyle default stroke:#8661C5,stroke-width:1.6px;
 ```
 
 Three ideas carry the design:
@@ -108,11 +104,6 @@ The reference deployment runs in a single Azure region (Canada East), with the A
 The bridge works because the Container Apps subnet routes to the AVS private cloud over ExpressRoute, while Foundry is reachable privately via a private endpoint.
 
 ```mermaid
-%%{init: {'theme':'base','themeVariables':{
-  'fontFamily':'Segoe UI, -apple-system, sans-serif',
-  'primaryColor':'#E8F1FB','primaryTextColor':'#1F2328','primaryBorderColor':'#0078D4',
-  'lineColor':'#8661C5','secondaryColor':'#F1EBFA','tertiaryColor':'#E8F6EE',
-  'clusterBkg':'#F6F9FC','clusterBorder':'#0078D4'}}}%%
 flowchart TB
     subgraph vnet["VNet: avs-hub-vnet (10.40.0.0/16)"]
         JB["Jumpbox 10.40.1.4"]
@@ -142,6 +133,7 @@ flowchart TB
     class MCP,PE,GW,JB,FDRY azure;
     class MGMT avs;
     class DB1,DB2 data;
+    linkStyle default stroke:#8661C5,stroke-width:1.6px;
 ```
 
 > Addresses above are from the lab this kit was validated in; substitute your own.
@@ -217,11 +209,6 @@ Generic, source-agnostic instructions (the productizable version) tell the agent
 <summary>The same exchange as a sequence diagram</summary>
 
 ```mermaid
-%%{init: {'theme':'base','themeVariables':{
-  'fontFamily':'Segoe UI, -apple-system, sans-serif',
-  'primaryColor':'#E8F1FB','primaryTextColor':'#1F2328','primaryBorderColor':'#0078D4',
-  'lineColor':'#8661C5','actorBkg':'#E8F1FB','actorBorder':'#0078D4','actorTextColor':'#1F2328',
-  'signalColor':'#505050','signalTextColor':'#1F2328','noteBkgColor':'#FFF4CE','noteBorderColor':'#C19C00'}}}%%
 sequenceDiagram
     participant U as User
     participant A as Foundry Agent
