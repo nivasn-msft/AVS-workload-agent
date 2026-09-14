@@ -15,6 +15,11 @@ This post shows a **repeatable pattern that closes that gap for any workload**: 
 One managed agent in Azure AI Foundry talks to your private AVS workloads through a set of small **MCP servers** — one per workload type. SQL databases are live today; a file-share bridge or an API bridge is *the same pattern with different tools*.
 
 ```mermaid
+%%{init: {'theme':'base','themeVariables':{
+  'fontFamily':'Segoe UI, -apple-system, sans-serif',
+  'primaryColor':'#E8F1FB','primaryTextColor':'#1F2328','primaryBorderColor':'#0078D4',
+  'lineColor':'#8661C5','secondaryColor':'#F1EBFA','tertiaryColor':'#E8F6EE',
+  'clusterBkg':'#F6F9FC','clusterBorder':'#0078D4'}}}%%
 flowchart LR
     U["Business users<br/>Teams · Copilot · Foundry"] --> AG["Azure AI Foundry<br/>managed agent"]
     subgraph az["Azure — VNet-integrated Container Apps"]
@@ -33,6 +38,13 @@ flowchart LR
     M1 -->|"ExpressRoute"| W1
     M2 -->|"ExpressRoute"| W2
     M3 -->|"ExpressRoute"| W3
+
+    classDef azure fill:#E8F1FB,stroke:#0078D4,stroke-width:1.5px,color:#1F2328;
+    classDef avs fill:#FFFFFF,stroke:#1F2328,stroke-width:1.5px,color:#1F2328;
+    classDef user fill:#F1EBFA,stroke:#8661C5,stroke-width:1.5px,color:#1F2328;
+    class M1,M2,M3,AG azure;
+    class W1,W2,W3 avs;
+    class U user;
 ```
 
 Three ideas carry the design:
@@ -96,6 +108,11 @@ The reference deployment runs in a single Azure region (Canada East), with the A
 The bridge works because the Container Apps subnet routes to the AVS private cloud over ExpressRoute, while Foundry is reachable privately via a private endpoint.
 
 ```mermaid
+%%{init: {'theme':'base','themeVariables':{
+  'fontFamily':'Segoe UI, -apple-system, sans-serif',
+  'primaryColor':'#E8F1FB','primaryTextColor':'#1F2328','primaryBorderColor':'#0078D4',
+  'lineColor':'#8661C5','secondaryColor':'#F1EBFA','tertiaryColor':'#E8F6EE',
+  'clusterBkg':'#F6F9FC','clusterBorder':'#0078D4'}}}%%
 flowchart TB
     subgraph vnet["VNet: avs-hub-vnet (10.40.0.0/16)"]
         JB["Jumpbox 10.40.1.4"]
@@ -118,7 +135,16 @@ flowchart TB
     MCP --> DB2
     FDRY -. private endpoint .-> PE
     FDRY -->|HTTPS + Entra token| MCP
+
+    classDef azure fill:#E8F1FB,stroke:#0078D4,stroke-width:1.5px,color:#1F2328;
+    classDef avs fill:#FFFFFF,stroke:#1F2328,stroke-width:1.5px,color:#1F2328;
+    classDef data fill:#E8F6EE,stroke:#107C41,stroke-width:1.5px,color:#1F2328;
+    class MCP,PE,GW,JB,FDRY azure;
+    class MGMT avs;
+    class DB1,DB2 data;
 ```
+
+> Addresses above are from the lab this kit was validated in; substitute your own.
 
 Key points:
 - The **MCP server** runs in a delegated **`aca-subnet`** and reaches the workload segment over ExpressRoute.
@@ -182,7 +208,20 @@ Generic, source-agnostic instructions (the productizable version) tell the agent
 
 ## How a question becomes an answer
 
+<picture>
+  <source media="(prefers-color-scheme: dark)" srcset="./media/diagrams/request-flow-dark.svg">
+  <img alt="One question, hop by hop: the user asks the agent, the agent calls list_sources, get_schema and run_query with an Entra token that the server validates every time, the server fetches the password from Key Vault, runs a single read-only SELECT against the AVS database VMs, and capped rows travel back for the model to write up." src="./media/diagrams/request-flow.svg">
+</picture>
+
+<details>
+<summary>The same exchange as a sequence diagram</summary>
+
 ```mermaid
+%%{init: {'theme':'base','themeVariables':{
+  'fontFamily':'Segoe UI, -apple-system, sans-serif',
+  'primaryColor':'#E8F1FB','primaryTextColor':'#1F2328','primaryBorderColor':'#0078D4',
+  'lineColor':'#8661C5','actorBkg':'#E8F1FB','actorBorder':'#0078D4','actorTextColor':'#1F2328',
+  'signalColor':'#505050','signalTextColor':'#1F2328','noteBkgColor':'#FFF4CE','noteBorderColor':'#C19C00'}}}%%
 sequenceDiagram
     participant U as User
     participant A as Foundry Agent
@@ -203,6 +242,8 @@ sequenceDiagram
     D-->>M: rows
     A-->>U: Corroborated answer: REORDER / OVERSTOCKED / DISCREPANCY
 ```
+
+</details>
 
 ---
 

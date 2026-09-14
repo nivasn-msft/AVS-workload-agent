@@ -38,28 +38,10 @@ This repository is a complete, deployable kit: infrastructure templates, the MCP
 
 ## How it works
 
-```mermaid
-flowchart LR
-    U["You<br/>playground, app, or API"]
-
-    subgraph azure["Your Azure subscription"]
-        A["Azure AI Foundry<br/>managed agent"]
-        M["MCP server<br/>Azure Container Apps<br/>VNet-integrated"]
-        KV["Key Vault<br/>database passwords"]
-    end
-
-    subgraph avs["Your AVS private cloud"]
-        DB[("Database VMs<br/>on an NSX segment")]
-    end
-
-    U --> A
-    A -->|"MCP over HTTPS<br/>Entra token"| M
-    M -->|"managed identity"| KV
-    M -->|"private connectivity<br/>no public exposure"| DB
-    DB -.->|"selected rows"| M
-    M -.-> A
-    A -.->|"answer"| U
-```
+<picture>
+  <source media="(prefers-color-scheme: dark)" srcset="docs/media/diagrams/architecture-dark.svg">
+  <img alt="A question travels from you to the Foundry agent, over an Entra-authenticated MCP call to a VNet-integrated MCP server, which reads a password from Key Vault and runs one read-only SELECT against database VMs inside the AVS private cloud." src="docs/media/diagrams/architecture.svg">
+</picture>
 
 The agent has no database credentials and no network path of its own. It can only call three tools on the MCP server:
 
@@ -96,7 +78,7 @@ A real run looks like this — the model discovers the sources, reads the schema
 | `infra/deploy.ps1` | One command: deploy infra → build/push the MCP image → point the app at it |
 | `infra/connectivity.bicep` | **Optional, AVS Gen 1 only** — creates a VNet + ExpressRoute connection to your private cloud, if you don't already have one |
 | `app/` | The MCP server: `Dockerfile`, `mcp_server.py`, `requirements.txt`, `sources.yaml` |
-| `docs/` | A technical write-up (`blog.md`) and screenshots (`media/`) |
+| `docs/` | A technical write-up (`blog.md`), screenshots (`media/`), and the diagram sources (`media/diagrams/`) |
 
 ---
 
@@ -124,6 +106,11 @@ You do **not** need Docker installed — the image is built in Azure by `az acr 
 ---
 
 ## AVS Gen 1 and Gen 2
+
+<picture>
+  <source media="(prefers-color-scheme: dark)" srcset="docs/media/diagrams/gen1-gen2-dark.svg">
+  <img alt="On Generation 1 the AVS private cloud sits outside your VNet and is reached over an ExpressRoute connection; on Generation 2 it lives inside a VNet you own, so the MCP server reaches it directly. The MCP server and Key Vault are identical in both." src="docs/media/diagrams/gen1-gen2.svg">
+</picture>
 
 The agent, the MCP server, and its authentication are **generation-agnostic** — they only need IP reachability to your database VMs on their database port. `main.bicep` never references an AVS resource; it takes the name of an existing VNet, so it deploys unchanged on both generations. Only the **networking you point it at** differs:
 
@@ -575,6 +562,11 @@ Set by the template; listed here because you may need to change them later.
 ---
 
 ## Security model
+
+<picture>
+  <source media="(prefers-color-scheme: dark)" srcset="docs/media/diagrams/request-flow-dark.svg">
+  <img alt="One question, hop by hop: you ask the agent, the agent calls list_sources, get_schema and run_query with an Entra token that the server checks every time, the server fetches the password from Key Vault, runs a single read-only SELECT against the database, and capped rows travel back for the model to write up." src="docs/media/diagrams/request-flow.svg">
+</picture>
 
 - **Read-only, in two independent layers.** The server accepts only a single statement that starts with `SELECT` or `WITH`, rejects embedded semicolons, and blocks write keywords — checking the query both as written and with SQL comments stripped and whitespace normalised, so neither `SELECT *\nINTO t …` nor a keyword split by `/*…*/` can sneak past the filter. Treat that as **defence in depth, not the boundary** — a text filter can never fully model every SQL dialect. **The real boundary is the database:** grant the login `db_datareader` (or access to specific views) and nothing more, so the engine itself refuses anything else.
 - **Schema filters are not access control.** `allow_schemas` / `deny_tables` shape what `get_schema` reveals; they don't restrict `run_query`. See [Step 2](#step-2--register-your-databases).
